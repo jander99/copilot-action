@@ -247,7 +247,17 @@ export class ClaudeCodeValidatorRuntime {
     const scopedEnv: NodeJS.ProcessEnv = {
       ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? '',
       ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN ?? '',
-      ANTHROPIC_API_KEY: '',
+      // Conditional: only force-empty when `ANTHROPIC_BASE_URL`
+      // is set (third-party routing, e.g. Minimax). When routing
+      // through a third-party Anthropic-compatible endpoint, the
+      // auth comes via `ANTHROPIC_AUTH_TOKEN` (Bearer); the empty
+      // string suppresses Claude Code's OAuth fallback. Standard
+      // Anthropic users (no `ANTHROPIC_BASE_URL`) get their real
+      // `ANTHROPIC_API_KEY` passed through so the CLI's normal
+      // auth flow works. See project memory #188.
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_BASE_URL
+        ? ''
+        : (process.env.ANTHROPIC_API_KEY ?? ''),
       ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? '',
       CLAUDE_ENABLE_BYTE_WATCHDOG: '0',
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',

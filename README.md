@@ -9,7 +9,7 @@ AI Review Action runs repository reviews through either the OpenCode CLI or the 
 - `git`, `bash`, `tar`, `curl`, and Node/npm tooling on `PATH`. `ubuntu-latest` provides these; Node 22+ is recommended when installing skills with `npx`.
 - The chosen reviewer CLI installed as a separate workflow step before this action:
   - For `tool: opencode` (default): install OpenCode with the standalone [`setup-opencode`](#opencode-installation) action and pin its SHA-256 checksum.
-  - For `tool: claude`: install the Claude Code CLI (e.g., via `@anthropic-ai/claude-code`'s installer or a custom step) and expose `ANTHROPIC_API_KEY` (or route through `ANTHROPIC_BASE_URL`).
+  - For `tool: claude`: install the Claude Code CLI (e.g., via `@anthropic-ai/claude-code`'s installer or a custom step). Standard Anthropic users expose `ANTHROPIC_API_KEY`; users routing through an Anthropic-compatible endpoint (e.g. Minimax) expose `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` instead (see `ANTHROPIC_API_KEY handling` below).
 - At least one provider credential exposed as an environment variable.
 - A prompt using the `file:` or `text:` prefix.
 
@@ -524,6 +524,17 @@ Credentials are environment variables, not action inputs. Native providers are d
 | Other providers | User-defined through `opencode-config` (opencode only) | Any `{env:USER_DEFINED_VAR}` referenced by that configuration |
 
 For built-in providers, the merged configuration references secrets with OpenCode's `{env:VAR}` syntax rather than embedding key values. For `tool: claude`, the action passes `ANTHROPIC_*` environment variables through unchanged so the caller can also route through `ANTHROPIC_BASE_URL` to any Anthropic-compatible endpoint.
+
+### `ANTHROPIC_API_KEY` handling for `tool: claude`
+
+The Claude Code CLI's authentication behavior depends on two env vars: `ANTHROPIC_API_KEY` (the standard key) and `ANTHROPIC_BASE_URL` (a third-party routing signal). When `ANTHROPIC_BASE_URL` is set, the action force-empties `ANTHROPIC_API_KEY` so Claude Code's OAuth-fallback is suppressed and the endpoint routes via `ANTHROPIC_AUTH_TOKEN` (Bearer auth). When `ANTHROPIC_BASE_URL` is unset, the action passes the user's real `ANTHROPIC_API_KEY` through untouched so standard Anthropic users get the expected auth flow.
+
+| `ANTHROPIC_BASE_URL` | `ANTHROPIC_API_KEY` forwarded as | Why |
+|---|---|---|
+| unset (or empty string) | `process.env.ANTHROPIC_API_KEY` (or `''` if not set) | Standard Anthropic users. The CLI uses the supplied key normally. |
+| set (e.g. `https://api.minimax.io/anthropic`) | `''` (empty string) | Third-party Anthropic-compatible endpoints. The empty string suppresses Claude Code's OAuth fallback; auth comes via `ANTHROPIC_AUTH_TOKEN` (Bearer). |
+
+This is conditional on the **presence** of `ANTHROPIC_BASE_URL`, not on its actual value. Setting `ANTHROPIC_BASE_URL` to any non-empty string flips the action into third-party-routing mode. Standard Anthropic users leave `ANTHROPIC_BASE_URL` unset and the action forwards their real `ANTHROPIC_API_KEY` unchanged.
 
 ## OpenCode installation
 

@@ -288,15 +288,23 @@ test('runClaudeRun routes the prompt through stdin when options.input is set (E2
 test('buildEnvironment passes only the allow-listed keys to the spawned process (no workflow secrets)', () => {
   // Regression guard for the "forwarded secrets" reviewer finding:
   // `buildEnvironment` must NOT spread `process.env`. The review
-  // only needs the allow-listed keys (5 endpoint vars + the empty
-  // `ANTHROPIC_API_KEY` suppression + `PATH` for binary lookup).
+  // only needs the allow-listed keys (5 endpoint vars + the
+  // conditional `ANTHROPIC_API_KEY` + `PATH` for binary lookup).
   // Even when arbitrary secrets are set in `process.env`, the
   // spawn's env must not contain them.
+  //
+  // This sub-test covers the standard-anthropic case (no
+  // `ANTHROPIC_BASE_URL`): since `ANTHROPIC_API_KEY` flows
+  // through from `process.env`, the test asserts the user-supplied
+  // value is preserved. The third-party case (where
+  // `ANTHROPIC_API_KEY` is force-empty) is covered separately.
   const ORIGINAL_ENV = process.env;
   // Plant a handful of secrets in `process.env`; the runtime
-  // must NOT forward them.
+  // must NOT forward them. `ANTHROPIC_API_KEY` is set to a
+  // standard-anthropic key value so we can verify the passthrough.
   process.env = {
     ...ORIGINAL_ENV,
+    ANTHROPIC_API_KEY: 'sk-ant-real-key',
     GITHUB_TOKEN: 'ghp_supersecret',
     AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE',
     AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
@@ -311,7 +319,7 @@ test('buildEnvironment passes only the allow-listed keys to the spawned process 
     // The 5 endpoint keys the review actually needs.
     assert.ok('ANTHROPIC_BASE_URL' in env, 'ANTHROPIC_BASE_URL must be present');
     assert.ok('ANTHROPIC_AUTH_TOKEN' in env, 'ANTHROPIC_AUTH_TOKEN must be present');
-    assert.ok('ANTHROPIC_API_KEY' in env, 'ANTHROPIC_API_KEY must be present (empty string suppresses OAuth fallback)');
+    assert.ok('ANTHROPIC_API_KEY' in env, 'ANTHROPIC_API_KEY must be present');
     assert.ok('ANTHROPIC_MODEL' in env, 'ANTHROPIC_MODEL must be present');
     assert.ok('CLAUDE_ENABLE_BYTE_WATCHDOG' in env, 'CLAUDE_ENABLE_BYTE_WATCHDOG must be present');
     assert.ok('CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS' in env, 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS must be present');
@@ -320,8 +328,10 @@ test('buildEnvironment passes only the allow-listed keys to the spawned process 
     // PATH, the spawn fails with ENOENT.
     assert.ok('PATH' in env, 'PATH must be present so the OS can resolve the `claude` binary');
 
-    // Empty defaults when the env vars are not set.
-    assert.equal(env.ANTHROPIC_API_KEY, '');
+    // Standard-anthropic case: no `ANTHROPIC_BASE_URL` set, so the
+    // user's real `ANTHROPIC_API_KEY` flows through. Don't force-empty.
+    assert.equal(env.ANTHROPIC_BASE_URL, '');
+    assert.equal(env.ANTHROPIC_API_KEY, 'sk-ant-real-key', 'real ANTHROPIC_API_KEY must flow through when ANTHROPIC_BASE_URL is unset');
     assert.equal(env.CLAUDE_ENABLE_BYTE_WATCHDOG, '0');
     assert.equal(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, '1');
 
@@ -337,7 +347,7 @@ test('buildEnvironment passes only the allow-listed keys to the spawned process 
     assert.equal(
       Object.keys(env).sort().join(','),
       ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL', 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS', 'CLAUDE_ENABLE_BYTE_WATCHDOG', 'PATH'].sort().join(','),
-      'env must contain exactly the 7 allow-listed keys (5 endpoint + empty ANTHROPIC_API_KEY + PATH)',
+      'env must contain exactly the 7 allow-listed keys',
     );
   } finally {
     process.env = ORIGINAL_ENV;
@@ -374,11 +384,18 @@ test('buildEnvironment forwards the allow-listed claude-keys when present in pro
   // The runtime reads ANTHROPIC_*, CLAUDE_*, and PATH from
   // process.env as the action layer's "passthrough" surface. The
   // runtime does NOT read arbitrary workflow secrets.
+  //
+  // This covers the third-party case (with `ANTHROPIC_BASE_URL`):
+  // `ANTHROPIC_API_KEY` is force-empty so Claude Code's OAuth
+  // fallback is suppressed and the endpoint routes via
+  // `ANTHROPIC_AUTH_TOKEN`. The standard-anthropic case (no
+  // `ANTHROPIC_BASE_URL`) is covered above.
   const ORIGINAL_ENV = process.env;
   process.env = {
     ...ORIGINAL_ENV,
     ANTHROPIC_BASE_URL: 'https://api.minimax.io/anthropic',
     ANTHROPIC_AUTH_TOKEN: 'token-abc',
+    ANTHROPIC_API_KEY: 'should-be-ignored-when-BASE_URL-set',
     ANTHROPIC_MODEL: 'MiniMax-M3',
     PATH: '/usr/local/bin:/usr/bin:/bin:/opt/hostedtoolcache',
     // These are NOT in the allow-list — they must NOT leak.
@@ -391,12 +408,82 @@ test('buildEnvironment forwards the allow-listed claude-keys when present in pro
     assert.equal(env.ANTHROPIC_BASE_URL, 'https://api.minimax.io/anthropic');
     assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'token-abc');
     assert.equal(env.ANTHROPIC_MODEL, 'MiniMax-M3');
-    assert.equal(env.ANTHROPIC_API_KEY, '');
+    // Third-party case: ANTHROPIC_API_KEY is force-empty EVEN
+    // WHEN the user sets it. The action layer's Bearer auth
+    // (ANTHROPIC_AUTH_TOKEN) is the only credential in this path.
+    assert.equal(env.ANTHROPIC_API_KEY, '', 'ANTHROPIC_API_KEY must be force-empty when ANTHROPIC_BASE_URL is set');
     assert.equal(env.CLAUDE_ENABLE_BYTE_WATCHDOG, '0');
     assert.equal(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, '1');
     assert.equal(env.PATH, '/usr/local/bin:/usr/bin:/bin:/opt/hostedtoolcache');
     assert.equal(env.GITHUB_TOKEN, undefined, 'GITHUB_TOKEN must not leak');
     assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined, 'AWS_SECRET_ACCESS_KEY must not leak');
+  } finally {
+    process.env = ORIGINAL_ENV;
+  }
+});
+
+test('buildEnvironment force-empties ANTHROPIC_API_KEY when ANTHROPIC_BASE_URL is set, even if user sets the key', () => {
+  // Direct regression guard for the "hardcoded empty ANTHROPIC_API_KEY
+  // breaks standard Anthropic usage" reviewer finding: the
+  // conditional logic must force-empty ONLY when
+  // `ANTHROPIC_BASE_URL` is set. This sub-test asserts the
+  // force-empty branch explicitly: with a `https://api.minimax.io/anthropic`
+  // URL AND a user-supplied `ANTHROPIC_API_KEY`, the spawn's env
+  // has the empty string (the user's key is overridden).
+  const ORIGINAL_ENV = process.env;
+  process.env = {
+    ...ORIGINAL_ENV,
+    ANTHROPIC_BASE_URL: 'https://api.minimax.io/anthropic',
+    ANTHROPIC_AUTH_TOKEN: 'token-abc',
+    ANTHROPIC_API_KEY: 'sk-ant-user-supplied-key',
+  };
+  try {
+    const runtime = new ClaudeCodeRuntime();
+    const env = runtime.buildEnvironment({});
+    assert.equal(env.ANTHROPIC_API_KEY, '', 'ANTHROPIC_API_KEY must be force-empty when ANTHROPIC_BASE_URL is set');
+    assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'token-abc', 'third-party routing uses ANTHROPIC_AUTH_TOKEN');
+  } finally {
+    process.env = ORIGINAL_ENV;
+  }
+});
+
+test('buildEnvironment preserves ANTHROPIC_API_KEY when ANTHROPIC_BASE_URL is unset (standard Anthropic)', () => {
+  // Direct regression guard for the same finding: when the user
+  // is on standard Anthropic (no `ANTHROPIC_BASE_URL`), their
+  // real `ANTHROPIC_API_KEY` flows through. The previous
+  // implementation force-empty'd always, which broke standard
+  // Anthropic users.
+  const ORIGINAL_ENV = process.env;
+  process.env = {
+    ...ORIGINAL_ENV,
+    ANTHROPIC_API_KEY: 'sk-ant-real-key-no-third-party',
+  };
+  try {
+    const runtime = new ClaudeCodeRuntime();
+    const env = runtime.buildEnvironment({});
+    assert.equal(env.ANTHROPIC_API_KEY, 'sk-ant-real-key-no-third-party', 'real ANTHROPIC_API_KEY must flow through when ANTHROPIC_BASE_URL is unset');
+    assert.equal(env.ANTHROPIC_BASE_URL, '');
+  } finally {
+    process.env = ORIGINAL_ENV;
+  }
+});
+
+test('buildEnvironment treats ANTHROPIC_BASE_URL="" the same as unset (standard Anthropic)', () => {
+  // Edge case: an empty-string `ANTHROPIC_BASE_URL` is the
+  // falsy default; per the falsy-coercion rule, the user's
+  // `ANTHROPIC_API_KEY` flows through. Asserting this explicitly
+  // so a future refactor that uses `!==` instead of truthy eval
+  // doesn't accidentally regress the standard-anthropic default.
+  const ORIGINAL_ENV = process.env;
+  process.env = {
+    ...ORIGINAL_ENV,
+    ANTHROPIC_BASE_URL: '',
+    ANTHROPIC_API_KEY: 'sk-ant-real-key',
+  };
+  try {
+    const runtime = new ClaudeCodeRuntime();
+    const env = runtime.buildEnvironment({});
+    assert.equal(env.ANTHROPIC_API_KEY, 'sk-ant-real-key', 'empty-string ANTHROPIC_BASE_URL is treated as unset');
   } finally {
     process.env = ORIGINAL_ENV;
   }

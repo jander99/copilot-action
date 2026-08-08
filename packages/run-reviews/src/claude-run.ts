@@ -166,10 +166,15 @@ export class ClaudeCodeRuntime implements ReviewRuntime {
     // and any override happens there. The runtime does not need to
     // consult `process.env` for arbitrary entries.
     //
-    // `ANTHROPIC_API_KEY` is set to the empty string (NOT unset)
-    // so Claude Code CLI's OAuth fallback is suppressed and the
-    // endpoint routes via `ANTHROPIC_AUTH_TOKEN`. See project
-    // memory #188.
+    // `ANTHROPIC_API_KEY` is conditional: only force-empty when
+    // `ANTHROPIC_BASE_URL` is set (third-party routing, e.g.
+    // Minimax). When routing through a third-party Anthropic-
+    // compatible endpoint, the auth comes via
+    // `ANTHROPIC_AUTH_TOKEN` (Bearer); the empty string
+    // suppresses Claude Code's OAuth fallback. Standard
+    // Anthropic users (no `ANTHROPIC_BASE_URL`) get their real
+    // `ANTHROPIC_API_KEY` passed through so the CLI's normal
+    // auth flow works. See project memory #188.
     //
     // `PATH` is intentionally in the allow-list: the spawn calls
     // `claude` (a bare command, not an absolute path), so the OS
@@ -181,7 +186,9 @@ export class ClaudeCodeRuntime implements ReviewRuntime {
     return {
       ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? '',
       ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN ?? '',
-      ANTHROPIC_API_KEY: '',
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_BASE_URL
+        ? ''
+        : (process.env.ANTHROPIC_API_KEY ?? ''),
       ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? '',
       CLAUDE_ENABLE_BYTE_WATCHDOG: '0',
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
