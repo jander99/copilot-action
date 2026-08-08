@@ -35,6 +35,16 @@ export type RunClaudeRunResult = ReviewRuntimeResult;
 // Read-only git subset mirrored from OpenCodeRuntime's OPENCODE_PERMISSION
 // bash allow-list. Claude Code's `--allowedTools` syntax uses the same
 // `<tool>(<pattern>)` shape for bash commands.
+//
+// `query` is intentionally NOT included. It is Claude Code's
+// internal sub-query / sub-agent tool that lets the model delegate
+// to a child agent. Code review does not need sub-agents (that's an
+// interactive feature), and a sub-agent hop is exactly where the
+// read-only boundary breaks down: the child agent inherits the
+// parent's effective permission scope, but the boundary on
+// `--allowedTools` is enforced at the parent invocation, not in
+// the child. Keeping `query` out of the allow-list forces the model
+// to do the read-only work itself.
 const CLAUDE_ALLOWED_TOOLS = [
   'Read',
   'Glob',
@@ -43,7 +53,6 @@ const CLAUDE_ALLOWED_TOOLS = [
   'Bash(git show *)',
   'Bash(git log *)',
   'Bash(git rev-parse *)',
-  'query',
 ] as const;
 
 interface ClaudeResultEvent {
@@ -144,10 +153,30 @@ export class ClaudeCodeRuntime implements ReviewRuntime {
   }
 
   buildEnvironment(_options: ReviewRuntimeOptions): NodeJS.ProcessEnv {
-    // Pass-through: do NOT strip `OPENCODE_*` (irrelevant to Claude)
-    // and do NOT strip `ANTHROPIC_*` (the caller may have set
-    // `ANTHROPIC_BASE_URL` etc. to route through a compatible endpoint).
-    return { ...process.env };
+    // Build the env from an explicit allow-list rather than
+    // spreading `process.env`. Spreading `process.env` forwards
+    // every workflow secret (GITHUB_TOKEN, AWS_*, MINIMAX_API_KEY,
+    // etc.) to the CLI — the review only needs the five keys
+    // below to route through the Anthropic-compatible endpoint.
+    //
+    // The action layer is the source of truth for endpoint
+    // configuration: it sets the five keys via the workflow
+    // `env:` block (see `.github/workflows/ai-review.yml`) and any
+    // override happens there. The runtime does not need to consult
+    // `process.env` for arbitrary entries.
+    //
+    // `ANTHROPIC_API_KEY` is set to the empty string (NOT unset)
+    // so Claude Code CLI's OAuth fallback is suppressed and the
+    // endpoint routes via `ANTHROPIC_AUTH_TOKEN`. See project
+    // memory #188.
+    return {
+      ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? '',
+      ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN ?? '',
+      ANTHROPIC_API_KEY: '',
+      ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? '',
+      CLAUDE_ENABLE_BYTE_WATCHDOG: '0',
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+    };
   }
 
   commandArgs(model: string, prompt: string, useStdin: boolean): string[] {

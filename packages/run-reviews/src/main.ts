@@ -500,12 +500,14 @@ export async function runReviews(options: RunReviewsOptions): Promise<RunReviews
     // Claude Code does not consume an OpenCode config or an isolated
     // home directory. Use `os.tmpdir()` as a stand-in `homeDir` so
     // the dispatcher signature stays uniform across runtimes; the
-    // `ClaudeCodeRuntime.buildEnvironment` pass-through ignores it.
+    // `ClaudeCodeRuntime.buildEnvironment` ignores it (it builds
+    // the env from a fixed allow-list, not from `homeDir`). The
     // `configPath` is unused for the same reason. The validator
-    // config is also omitted - the validator is opencode-only (see
-    // packages/validate-review/src/main.ts); root-action must skip
-    // the validator step when `tool === 'claude'` (TODO: that is a
-    // future change, not part of this PR per the spec).
+    // config is also omitted because the validator is now
+    // tool-aware and mirrors the reviewer's runtime: at the
+    // `tool: claude` path the validator dispatches through
+    // `claude-validate.ts` (Claude Code CLI) instead of the
+    // opencode-only path, so `passedConfigJson` is unused.
     configPath = '';
     homeDir = os.tmpdir();
     serializedConfig = '';

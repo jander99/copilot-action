@@ -104,7 +104,8 @@ test('runClaudeRun spawns claude with expected flags', async () => {
   );
 
   // The full allowedTools allow-list must be present, each as its own
-  // argv entry.
+  // argv entry. `query` (Claude Code's internal sub-agent tool) is
+  // intentionally excluded — see ClaudeCodeRuntime's doc comment.
   const expectedTools = [
     'Read',
     'Glob',
@@ -113,7 +114,6 @@ test('runClaudeRun spawns claude with expected flags', async () => {
     'Bash(git show *)',
     'Bash(git log *)',
     'Bash(git rev-parse *)',
-    'query',
   ];
   const seenTools = [];
   for (let i = 0; i < args.length; i += 1) {
@@ -123,6 +123,10 @@ test('runClaudeRun spawns claude with expected flags', async () => {
     }
   }
   assert.deepEqual(seenTools, expectedTools, 'every allowedTool must appear once');
+  assert.ok(
+    !seenTools.includes('query'),
+    'query MUST NOT be in the allowedTools list — sub-agent hops break the read-only boundary',
+  );
 
   // Resolved model (provider prefix stripped) is passed to --model.
   const modelFlagIndex = args.indexOf('--model');
@@ -279,4 +283,88 @@ test('runClaudeRun routes the prompt through stdin when options.input is set (E2
   assert.equal(stdinContent, bigPrompt, 'prompt must be delivered via stdin');
   // stdio[0] is 'pipe' when input is set; 'ignore' otherwise.
   assert.equal(spawnCalls[0].options.stdio[0], 'pipe', 'stdin must be a writable pipe');
+});
+
+test('buildEnvironment passes only the 5 claude-keys to the spawned process (no workflow secrets)', () => {
+  // Regression guard for the "forwarded secrets" reviewer finding:
+  // `buildEnvironment` must NOT spread `process.env`. The review
+  // only needs the 5 keys required for the Anthropic-compatible
+  // endpoint. Even when arbitrary secrets are set in `process.env`,
+  // the spawn's env must not contain them.
+  const ORIGINAL_ENV = process.env;
+  // Plant a handful of secrets in `process.env`; the runtime
+  // must NOT forward them.
+  process.env = {
+    ...ORIGINAL_ENV,
+    GITHUB_TOKEN: 'ghp_supersecret',
+    AWS_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE',
+    AWS_SECRET_ACCESS_KEY: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    MINIMAX_API_KEY: 'sk-minimax-supersecret',
+    NPM_TOKEN: 'npm_supersecret',
+    RANDOM_OTHER_SECRET: 'should-not-leak',
+  };
+  try {
+    const runtime = new ClaudeCodeRuntime();
+    const env = runtime.buildEnvironment({});
+
+    // The 5 keys the review actually needs.
+    assert.ok('ANTHROPIC_BASE_URL' in env, 'ANTHROPIC_BASE_URL must be present');
+    assert.ok('ANTHROPIC_AUTH_TOKEN' in env, 'ANTHROPIC_AUTH_TOKEN must be present');
+    assert.ok('ANTHROPIC_API_KEY' in env, 'ANTHROPIC_API_KEY must be present (empty string suppresses OAuth fallback)');
+    assert.ok('ANTHROPIC_MODEL' in env, 'ANTHROPIC_MODEL must be present');
+    assert.ok('CLAUDE_ENABLE_BYTE_WATCHDOG' in env, 'CLAUDE_ENABLE_BYTE_WATCHDOG must be present');
+    assert.ok('CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS' in env, 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS must be present');
+
+    // Empty defaults when the env vars are not set.
+    assert.equal(env.ANTHROPIC_API_KEY, '');
+    assert.equal(env.CLAUDE_ENABLE_BYTE_WATCHDOG, '0');
+    assert.equal(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, '1');
+
+    // No workflow secrets leaked.
+    for (const key of Object.keys(env)) {
+      assert.ok(
+        !['GITHUB_TOKEN', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'MINIMAX_API_KEY', 'NPM_TOKEN', 'RANDOM_OTHER_SECRET']
+          .includes(key),
+        `env must not contain ${key} (secret leak)`,
+      );
+    }
+    // The env is bounded: only the 6 keys above.
+    assert.equal(
+      Object.keys(env).sort().join(','),
+      ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL', 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS', 'CLAUDE_ENABLE_BYTE_WATCHDOG'].sort().join(','),
+      'env must contain exactly the 6 allow-listed keys (5 endpoint + 1 empty ANTHROPIC_API_KEY)',
+    );
+  } finally {
+    process.env = ORIGINAL_ENV;
+  }
+});
+
+test('buildEnvironment forwards the 5 claude-keys when present in process.env', () => {
+  // The runtime reads ANTHROPIC_* and CLAUDE_* from process.env
+  // as the action layer's "passthrough" surface. The runtime does
+  // NOT read arbitrary workflow secrets.
+  const ORIGINAL_ENV = process.env;
+  process.env = {
+    ...ORIGINAL_ENV,
+    ANTHROPIC_BASE_URL: 'https://api.minimax.io/anthropic',
+    ANTHROPIC_AUTH_TOKEN: 'token-abc',
+    ANTHROPIC_MODEL: 'MiniMax-M3',
+    // These are NOT in the allow-list — they must NOT leak.
+    GITHUB_TOKEN: 'should-not-leak',
+    AWS_SECRET_ACCESS_KEY: 'should-not-leak',
+  };
+  try {
+    const runtime = new ClaudeCodeRuntime();
+    const env = runtime.buildEnvironment({});
+    assert.equal(env.ANTHROPIC_BASE_URL, 'https://api.minimax.io/anthropic');
+    assert.equal(env.ANTHROPIC_AUTH_TOKEN, 'token-abc');
+    assert.equal(env.ANTHROPIC_MODEL, 'MiniMax-M3');
+    assert.equal(env.ANTHROPIC_API_KEY, '');
+    assert.equal(env.CLAUDE_ENABLE_BYTE_WATCHDOG, '0');
+    assert.equal(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, '1');
+    assert.equal(env.GITHUB_TOKEN, undefined, 'GITHUB_TOKEN must not leak');
+    assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined, 'AWS_SECRET_ACCESS_KEY must not leak');
+  } finally {
+    process.env = ORIGINAL_ENV;
+  }
 });

@@ -175,17 +175,18 @@ outputs:
       AND validator failures (reviewer succeeded but the document
       failed structural + model validation). When both fail, the
       reviewer message wins because the validator typically was
-      skipped. Note: when `tool: claude`, the validator is still
-      invoked but is opencode-only, so it currently rejects the run
-      with `passedConfigJson` validation failures - see the `tool`
-      input description for the current workaround status.
+      skipped. Note: when `tool: claude`, the validator dispatches
+      through the Claude Code CLI (the validator is tool-aware and
+      mirrors the reviewer's runtime); `passedConfigJson` is left
+      empty in that case.
   review-output-path:
     description: 'Runner-local path to the authoritative review markdown file written by the action from a validated model response.'
   config-json:
     description: >-
       OpenCode config JSON for the validator invocation (no agent
       review prompts, no path leakage, no user-supplied secrets).
-      Empty when `tool: claude` (the validator is opencode-only).
+      Empty when `tool: claude` (the validator dispatches through
+      the Claude Code CLI in that case).
 
 runs:
   using: node24

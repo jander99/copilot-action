@@ -37,6 +37,13 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+// Read-only git subset mirrored from the reviewer's
+// `CLAUDE_ALLOWED_TOOLS`. `query` is intentionally NOT included:
+// it is Claude Code's internal sub-query / sub-agent tool that
+// lets the model delegate to a child agent. The validator doesn't
+// need sub-agents, and a sub-agent hop is exactly where the
+// read-only boundary breaks down. Keeping `query` out of the
+// allow-list forces the model to do the read-only work itself.
 const CLAUDE_VALIDATOR_ALLOWED_TOOLS = [
   'Read',
   'Glob',
@@ -45,7 +52,6 @@ const CLAUDE_VALIDATOR_ALLOWED_TOOLS = [
   'Bash(git show *)',
   'Bash(git log *)',
   'Bash(git rev-parse *)',
-  'query',
 ] as const;
 
 interface ClaudeResultEvent {
@@ -207,15 +213,33 @@ export class ClaudeCodeValidatorRuntime {
   }
 
   /**
-   * Build the env for the spawned process. Mirrors
-   * `process.env` (the action's reviewer's claude runtime already
-   * does this), then layers the explicit `passthroughEnv` overrides
-   * on top so the action layer can route through
-   * `ANTHROPIC_BASE_URL` etc. without the runtime having to know
-   * which keys are interesting.
+   * Build the env for the spawned process. Start from the
+   * allow-listed 5 keys (same as the reviewer's claude runtime),
+   * then layer the explicit `passthroughEnv` overrides on top so
+   * the action layer can route through `ANTHROPIC_BASE_URL` etc.
+   * without the runtime having to know which keys are
+   * interesting.
+   *
+   * `process.env` is NOT spread: doing so would forward every
+   * workflow secret (GITHUB_TOKEN, AWS_*, MINIMAX_API_KEY, etc.)
+   * to the CLI. The validator only needs the five keys below to
+   * route through the Anthropic-compatible endpoint.
+   *
+   * `ANTHROPIC_API_KEY` is set to the empty string (NOT unset)
+   * so Claude Code CLI's OAuth fallback is suppressed and the
+   * endpoint routes via `ANTHROPIC_AUTH_TOKEN`. See project
+   * memory #188.
    */
   buildEnvironment(passthroughEnv: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
-    return { ...process.env, ...(passthroughEnv ?? {}) };
+    const scopedEnv: NodeJS.ProcessEnv = {
+      ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? '',
+      ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN ?? '',
+      ANTHROPIC_API_KEY: '',
+      ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? '',
+      CLAUDE_ENABLE_BYTE_WATCHDOG: '0',
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+    };
+    return { ...scopedEnv, ...(passthroughEnv ?? {}) };
   }
 
   commandArgs(model: string, prompt: string, useStdin: boolean): string[] {

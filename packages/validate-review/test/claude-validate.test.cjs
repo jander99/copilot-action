@@ -148,7 +148,9 @@ test('runClaudeValidator spawns claude with the expected flags (mirroring the re
     'must NOT pass --dangerously-skip-permissions — same security reason as the reviewer (allowlist enforcement)',
   );
 
-  // Same allow-list as the reviewer's claude runtime.
+  // Same allow-list as the reviewer's claude runtime. `query`
+  // (Claude Code's internal sub-agent tool) is intentionally
+  // excluded — see ClaudeCodeValidatorRuntime's doc comment.
   const expectedTools = [
     'Read',
     'Glob',
@@ -157,7 +159,6 @@ test('runClaudeValidator spawns claude with the expected flags (mirroring the re
     'Bash(git show *)',
     'Bash(git log *)',
     'Bash(git rev-parse *)',
-    'query',
   ];
   const seenTools = [];
   for (let i = 0; i < args.length; i += 1) {
@@ -167,6 +168,10 @@ test('runClaudeValidator spawns claude with the expected flags (mirroring the re
     }
   }
   assert.deepEqual(seenTools, expectedTools, 'validator allow-list must match reviewer allow-list');
+  assert.ok(
+    !seenTools.includes('query'),
+    'query MUST NOT be in the validator allowedTools list — sub-agent hops break the read-only boundary',
+  );
 
   // Resolved model (provider prefix stripped) is passed to --model.
   const modelFlagIndex = args.indexOf('--model');
@@ -274,25 +279,54 @@ test('ClaudeCodeValidatorRuntime.resolveModel strips the provider prefix', () =>
   assert.throws(() => runtime.resolveModel('MiniMax-M3'), /requires model in 'provider\/model' format/);
 });
 
-test('ClaudeCodeValidatorRuntime.buildEnvironment merges passthroughEnv over process.env', () => {
-  // Snapshot the real process.env so we can detect what the runtime
-  // touches. passthroughEnv overrides should always win.
-  const original = process.env.MINIMAX_TEST_VAR;
-  process.env.MINIMAX_TEST_VAR = 'from-process-env';
+test('ClaudeCodeValidatorRuntime.buildEnvironment layers passthroughEnv over the scoped 5-key env', () => {
+  // Regression guard for the "forwarded secrets" finding: the
+  // validator's env is now built from a fixed 5-key allow-list
+  // (the same shape as the reviewer's claude runtime). Spreading
+  // `process.env` is no longer in the path; if the workflow
+  // happens to set `GITHUB_TOKEN` or any other secret, it must
+  // NOT leak into the spawn's env.
+  const ORIGINAL_ENV = process.env;
+  process.env = {
+    ...ORIGINAL_ENV,
+    GITHUB_TOKEN: 'ghp_supersecret',
+    AWS_SECRET_ACCESS_KEY: 'should-not-leak',
+    MINIMAX_API_KEY: 'sk-minimax-supersecret',
+  };
   try {
     const runtime = new ClaudeCodeValidatorRuntime();
     const env = runtime.buildEnvironment({
-      MINIMAX_TEST_VAR: 'from-passthrough',
       ANTHROPIC_BASE_URL: 'https://override.example/anthropic',
     });
-    assert.equal(env.MINIMAX_TEST_VAR, 'from-passthrough', 'passthroughEnv overrides process.env');
+
+    // The 5 keys the review actually needs are present.
+    assert.ok('ANTHROPIC_BASE_URL' in env, 'ANTHROPIC_BASE_URL must be present');
+    assert.ok('ANTHROPIC_AUTH_TOKEN' in env, 'ANTHROPIC_AUTH_TOKEN must be present');
+    assert.ok('ANTHROPIC_API_KEY' in env, 'ANTHROPIC_API_KEY must be present');
+    assert.ok('ANTHROPIC_MODEL' in env, 'ANTHROPIC_MODEL must be present');
+    assert.ok('CLAUDE_ENABLE_BYTE_WATCHDOG' in env, 'CLAUDE_ENABLE_BYTE_WATCHDOG must be present');
+    assert.ok('CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS' in env, 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS must be present');
+
+    // passthroughEnv override wins for ANTHROPIC_* keys.
     assert.equal(env.ANTHROPIC_BASE_URL, 'https://override.example/anthropic');
+    // Empty defaults.
+    assert.equal(env.ANTHROPIC_API_KEY, '');
+    assert.equal(env.CLAUDE_ENABLE_BYTE_WATCHDOG, '0');
+    assert.equal(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, '1');
+
+    // No workflow secrets leaked.
+    assert.equal(env.GITHUB_TOKEN, undefined, 'GITHUB_TOKEN must not leak');
+    assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined, 'AWS_SECRET_ACCESS_KEY must not leak');
+    assert.equal(env.MINIMAX_API_KEY, undefined, 'MINIMAX_API_KEY must not leak');
+
+    // The env is bounded: only the 6 keys above.
+    assert.equal(
+      Object.keys(env).sort().join(','),
+      ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL', 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS', 'CLAUDE_ENABLE_BYTE_WATCHDOG'].sort().join(','),
+      'env must contain exactly the 6 allow-listed keys',
+    );
   } finally {
-    if (original === undefined) {
-      delete process.env.MINIMAX_TEST_VAR;
-    } else {
-      process.env.MINIMAX_TEST_VAR = original;
-    }
+    process.env = ORIGINAL_ENV;
   }
 });
 
