@@ -25437,7 +25437,7 @@ var ClaudeCodeRuntime = class {
     return {
       ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? "",
       ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN ?? "",
-      ANTHROPIC_API_KEY: "",
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_BASE_URL ? "" : process.env.ANTHROPIC_API_KEY ?? "",
       ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? "",
       CLAUDE_ENABLE_BYTE_WATCHDOG: "0",
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1",
