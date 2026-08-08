@@ -25373,8 +25373,7 @@ var CLAUDE_ALLOWED_TOOLS = [
   "Bash(git diff *)",
   "Bash(git show *)",
   "Bash(git log *)",
-  "Bash(git rev-parse *)",
-  "query"
+  "Bash(git rev-parse *)"
 ];
 function readNumber2(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : void 0;
@@ -25435,7 +25434,14 @@ var ClaudeCodeRuntime = class {
     return rawModel.slice(slashIndex + 1);
   }
   buildEnvironment(_options) {
-    return { ...process.env };
+    return {
+      ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? "",
+      ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN ?? "",
+      ANTHROPIC_API_KEY: "",
+      ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? "",
+      CLAUDE_ENABLE_BYTE_WATCHDOG: "0",
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+    };
   }
   commandArgs(model, prompt, useStdin) {
     const args = ["-p"];

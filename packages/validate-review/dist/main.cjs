@@ -20642,8 +20642,7 @@ var CLAUDE_VALIDATOR_ALLOWED_TOOLS = [
   "Bash(git diff *)",
   "Bash(git show *)",
   "Bash(git log *)",
-  "Bash(git rev-parse *)",
-  "query"
+  "Bash(git rev-parse *)"
 ];
 function readNumber2(value) {
   return typeof value === "number" && Number.isFinite(value) ? value : void 0;
@@ -20752,15 +20751,33 @@ var ClaudeCodeValidatorRuntime = class {
     return rawModel.slice(slashIndex + 1);
   }
   /**
-   * Build the env for the spawned process. Mirrors
-   * `process.env` (the action's reviewer's claude runtime already
-   * does this), then layers the explicit `passthroughEnv` overrides
-   * on top so the action layer can route through
-   * `ANTHROPIC_BASE_URL` etc. without the runtime having to know
-   * which keys are interesting.
+   * Build the env for the spawned process. Start from the
+   * allow-listed 5 keys (same as the reviewer's claude runtime),
+   * then layer the explicit `passthroughEnv` overrides on top so
+   * the action layer can route through `ANTHROPIC_BASE_URL` etc.
+   * without the runtime having to know which keys are
+   * interesting.
+   *
+   * `process.env` is NOT spread: doing so would forward every
+   * workflow secret (GITHUB_TOKEN, AWS_*, MINIMAX_API_KEY, etc.)
+   * to the CLI. The validator only needs the five keys below to
+   * route through the Anthropic-compatible endpoint.
+   *
+   * `ANTHROPIC_API_KEY` is set to the empty string (NOT unset)
+   * so Claude Code CLI's OAuth fallback is suppressed and the
+   * endpoint routes via `ANTHROPIC_AUTH_TOKEN`. See project
+   * memory #188.
    */
   buildEnvironment(passthroughEnv) {
-    return { ...process.env, ...passthroughEnv ?? {} };
+    const scopedEnv = {
+      ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? "",
+      ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN ?? "",
+      ANTHROPIC_API_KEY: "",
+      ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? "",
+      CLAUDE_ENABLE_BYTE_WATCHDOG: "0",
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+    };
+    return { ...scopedEnv, ...passthroughEnv ?? {} };
   }
   commandArgs(model, prompt, useStdin) {
     const args = ["-p"];
