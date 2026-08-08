@@ -200,6 +200,11 @@ test('runClaudeValidator env block carries the Anthropic-compatible endpoint swi
   // byte-level streaming watchdog; both flags disable that.
   assert.equal(env.CLAUDE_ENABLE_BYTE_WATCHDOG, '0');
   assert.equal(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, '1');
+  // PATH must be present so the OS can resolve the `claude` binary
+  // the spawn calls. The runtime seeds it from `process.env.PATH`
+  // (or the POSIX default if the parent env lost it); passthroughEnv
+  // (empty in this test) does not override it.
+  assert.ok(typeof env.PATH === 'string' && env.PATH.length > 0, 'PATH must be a non-empty string');
 });
 
 test('runClaudeValidator parses VALID response with cost + tokens', async () => {
@@ -279,19 +284,20 @@ test('ClaudeCodeValidatorRuntime.resolveModel strips the provider prefix', () =>
   assert.throws(() => runtime.resolveModel('MiniMax-M3'), /requires model in 'provider\/model' format/);
 });
 
-test('ClaudeCodeValidatorRuntime.buildEnvironment layers passthroughEnv over the scoped 5-key env', () => {
+test('ClaudeCodeValidatorRuntime.buildEnvironment layers passthroughEnv over the scoped allow-list', () => {
   // Regression guard for the "forwarded secrets" finding: the
-  // validator's env is now built from a fixed 5-key allow-list
-  // (the same shape as the reviewer's claude runtime). Spreading
-  // `process.env` is no longer in the path; if the workflow
-  // happens to set `GITHUB_TOKEN` or any other secret, it must
-  // NOT leak into the spawn's env.
+  // validator's env is built from a fixed allow-list (the same
+  // shape as the reviewer's claude runtime, plus `PATH` for
+  // binary lookup). Spreading `process.env` is no longer in the
+  // path; if the workflow happens to set `GITHUB_TOKEN` or any
+  // other secret, it must NOT leak into the spawn's env.
   const ORIGINAL_ENV = process.env;
   process.env = {
     ...ORIGINAL_ENV,
     GITHUB_TOKEN: 'ghp_supersecret',
     AWS_SECRET_ACCESS_KEY: 'should-not-leak',
     MINIMAX_API_KEY: 'sk-minimax-supersecret',
+    PATH: '/usr/local/bin:/usr/bin:/bin:/opt/hostedtoolcache',
   };
   try {
     const runtime = new ClaudeCodeValidatorRuntime();
@@ -299,13 +305,17 @@ test('ClaudeCodeValidatorRuntime.buildEnvironment layers passthroughEnv over the
       ANTHROPIC_BASE_URL: 'https://override.example/anthropic',
     });
 
-    // The 5 keys the review actually needs are present.
+    // The 5 endpoint keys the review actually needs are present.
     assert.ok('ANTHROPIC_BASE_URL' in env, 'ANTHROPIC_BASE_URL must be present');
     assert.ok('ANTHROPIC_AUTH_TOKEN' in env, 'ANTHROPIC_AUTH_TOKEN must be present');
     assert.ok('ANTHROPIC_API_KEY' in env, 'ANTHROPIC_API_KEY must be present');
     assert.ok('ANTHROPIC_MODEL' in env, 'ANTHROPIC_MODEL must be present');
     assert.ok('CLAUDE_ENABLE_BYTE_WATCHDOG' in env, 'CLAUDE_ENABLE_BYTE_WATCHDOG must be present');
     assert.ok('CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS' in env, 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS must be present');
+    // PATH is in the allow-list because the spawn calls `claude`
+    // (a bare command) and the OS resolves it via PATH. Without
+    // PATH, the spawn fails with ENOENT.
+    assert.ok('PATH' in env, 'PATH must be present so the OS can resolve the `claude` binary');
 
     // passthroughEnv override wins for ANTHROPIC_* keys.
     assert.equal(env.ANTHROPIC_BASE_URL, 'https://override.example/anthropic');
@@ -313,18 +323,60 @@ test('ClaudeCodeValidatorRuntime.buildEnvironment layers passthroughEnv over the
     assert.equal(env.ANTHROPIC_API_KEY, '');
     assert.equal(env.CLAUDE_ENABLE_BYTE_WATCHDOG, '0');
     assert.equal(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, '1');
+    // PATH is forwarded from process.env (passthroughEnv in this
+    // test does not override PATH).
+    assert.equal(env.PATH, '/usr/local/bin:/usr/bin:/bin:/opt/hostedtoolcache');
 
     // No workflow secrets leaked.
     assert.equal(env.GITHUB_TOKEN, undefined, 'GITHUB_TOKEN must not leak');
     assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined, 'AWS_SECRET_ACCESS_KEY must not leak');
     assert.equal(env.MINIMAX_API_KEY, undefined, 'MINIMAX_API_KEY must not leak');
 
-    // The env is bounded: only the 6 keys above.
+    // The env is bounded: only the 7 allow-listed keys.
     assert.equal(
       Object.keys(env).sort().join(','),
-      ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL', 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS', 'CLAUDE_ENABLE_BYTE_WATCHDOG'].sort().join(','),
-      'env must contain exactly the 6 allow-listed keys',
+      ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL', 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS', 'CLAUDE_ENABLE_BYTE_WATCHDOG', 'PATH'].sort().join(','),
+      'env must contain exactly the 7 allow-listed keys (5 endpoint + empty ANTHROPIC_API_KEY + PATH)',
     );
+  } finally {
+    process.env = ORIGINAL_ENV;
+  }
+});
+
+test('ClaudeCodeValidatorRuntime.buildEnvironment preserves PATH when passthroughEnv is empty', () => {
+  // Regression guard for the `spawn claude ENOENT` failure mode:
+  // when the env filter dropped PATH from the scoped env, the
+  // validator couldn't find `claude` on the runner. The runtime
+  // must keep PATH in the scoped env so the merge preserves it
+  // even when passthroughEnv is empty (the action layer does not
+  // currently set PATH via passthroughEnv; the scoped default is
+  // the only source).
+  const ORIGINAL_ENV = process.env;
+  process.env = { ...ORIGINAL_ENV, PATH: '/usr/local/bin:/usr/bin:/bin' };
+  try {
+    const runtime = new ClaudeCodeValidatorRuntime();
+    const env = runtime.buildEnvironment(undefined);
+    assert.equal(env.PATH, '/usr/local/bin:/usr/bin:/bin', 'PATH must be preserved from process.env when passthroughEnv is undefined');
+
+    const emptyPassthroughEnv = runtime.buildEnvironment({});
+    assert.equal(emptyPassthroughEnv.PATH, '/usr/local/bin:/usr/bin:/bin', 'PATH must be preserved from process.env when passthroughEnv is empty');
+  } finally {
+    process.env = ORIGINAL_ENV;
+  }
+});
+
+test('ClaudeCodeValidatorRuntime.buildEnvironment lets passthroughEnv override PATH', () => {
+  // The merge order is `scopedEnv` first, then `passthroughEnv`.
+  // A caller that knows better (e.g. a local dev CI with a custom
+  // PATH layout) can override PATH via the passthrough env. This
+  // is the documented behavior: passthrough wins for every key,
+  // including PATH.
+  const ORIGINAL_ENV = process.env;
+  process.env = { ...ORIGINAL_ENV, PATH: '/usr/bin' };
+  try {
+    const runtime = new ClaudeCodeValidatorRuntime();
+    const env = runtime.buildEnvironment({ PATH: '/custom/bin:/usr/bin' });
+    assert.equal(env.PATH, '/custom/bin:/usr/bin', 'passthroughEnv PATH must override the scoped PATH');
   } finally {
     process.env = ORIGINAL_ENV;
   }

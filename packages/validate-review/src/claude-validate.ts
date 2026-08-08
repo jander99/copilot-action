@@ -214,7 +214,7 @@ export class ClaudeCodeValidatorRuntime {
 
   /**
    * Build the env for the spawned process. Start from the
-   * allow-listed 5 keys (same as the reviewer's claude runtime),
+   * allow-listed keys (same as the reviewer's claude runtime),
    * then layer the explicit `passthroughEnv` overrides on top so
    * the action layer can route through `ANTHROPIC_BASE_URL` etc.
    * without the runtime having to know which keys are
@@ -222,13 +222,26 @@ export class ClaudeCodeValidatorRuntime {
    *
    * `process.env` is NOT spread: doing so would forward every
    * workflow secret (GITHUB_TOKEN, AWS_*, MINIMAX_API_KEY, etc.)
-   * to the CLI. The validator only needs the five keys below to
-   * route through the Anthropic-compatible endpoint.
+   * to the CLI. The validator only needs the allow-listed keys
+   * below to route through the Anthropic-compatible endpoint.
    *
    * `ANTHROPIC_API_KEY` is set to the empty string (NOT unset)
    * so Claude Code CLI's OAuth fallback is suppressed and the
    * endpoint routes via `ANTHROPIC_AUTH_TOKEN`. See project
    * memory #188.
+   *
+   * `PATH` is intentionally in the allow-list: the spawn calls
+   * `claude` (a bare command, not an absolute path), so the OS
+   * looks it up via `PATH`. Without `PATH` the spawn fails with
+   * `ENOENT`. `PATH` is the OS lookup path, not a secret — it
+   * carries the directory list, not credentials. Fall back to a
+   * POSIX-style default if the parent env somehow lost it so the
+   * spawn still finds `/usr/bin/claude` on a minimal runner.
+   *
+   * The merge order matters: `passthroughEnv` is spread AFTER
+   * `scopedEnv`, so a caller-supplied `PATH` overrides the
+   * default. When `passthroughEnv` is `undefined` (or empty),
+   * the scoped `PATH` wins.
    */
   buildEnvironment(passthroughEnv: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
     const scopedEnv: NodeJS.ProcessEnv = {
@@ -238,6 +251,7 @@ export class ClaudeCodeValidatorRuntime {
       ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? '',
       CLAUDE_ENABLE_BYTE_WATCHDOG: '0',
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+      PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
     };
     return { ...scopedEnv, ...(passthroughEnv ?? {}) };
   }

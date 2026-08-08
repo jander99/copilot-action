@@ -25440,7 +25440,8 @@ var ClaudeCodeRuntime = class {
       ANTHROPIC_API_KEY: "",
       ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? "",
       CLAUDE_ENABLE_BYTE_WATCHDOG: "0",
-      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1",
+      PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin"
     };
   }
   commandArgs(model, prompt, useStdin) {

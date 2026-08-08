@@ -156,19 +156,28 @@ export class ClaudeCodeRuntime implements ReviewRuntime {
     // Build the env from an explicit allow-list rather than
     // spreading `process.env`. Spreading `process.env` forwards
     // every workflow secret (GITHUB_TOKEN, AWS_*, MINIMAX_API_KEY,
-    // etc.) to the CLI — the review only needs the five keys
-    // below to route through the Anthropic-compatible endpoint.
+    // etc.) to the CLI — the review only needs the allow-listed
+    // keys below to route through the Anthropic-compatible
+    // endpoint.
     //
     // The action layer is the source of truth for endpoint
-    // configuration: it sets the five keys via the workflow
-    // `env:` block (see `.github/workflows/ai-review.yml`) and any
-    // override happens there. The runtime does not need to consult
-    // `process.env` for arbitrary entries.
+    // configuration: it sets the Anthropic + CLAUDE_* keys via
+    // the workflow `env:` block (see `.github/workflows/ai-review.yml`)
+    // and any override happens there. The runtime does not need to
+    // consult `process.env` for arbitrary entries.
     //
     // `ANTHROPIC_API_KEY` is set to the empty string (NOT unset)
     // so Claude Code CLI's OAuth fallback is suppressed and the
     // endpoint routes via `ANTHROPIC_AUTH_TOKEN`. See project
     // memory #188.
+    //
+    // `PATH` is intentionally in the allow-list: the spawn calls
+    // `claude` (a bare command, not an absolute path), so the OS
+    // looks it up via `PATH`. Without `PATH` the spawn fails with
+    // `ENOENT`. `PATH` is the OS lookup path, not a secret — it
+    // carries the directory list, not credentials. Fall back to a
+    // POSIX-style default if the parent env somehow lost it so the
+    // spawn still finds `/usr/bin/claude` on a minimal runner.
     return {
       ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? '',
       ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN ?? '',
@@ -176,6 +185,7 @@ export class ClaudeCodeRuntime implements ReviewRuntime {
       ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? '',
       CLAUDE_ENABLE_BYTE_WATCHDOG: '0',
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+      PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
     };
   }
 

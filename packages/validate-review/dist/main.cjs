@@ -20752,7 +20752,7 @@ var ClaudeCodeValidatorRuntime = class {
   }
   /**
    * Build the env for the spawned process. Start from the
-   * allow-listed 5 keys (same as the reviewer's claude runtime),
+   * allow-listed keys (same as the reviewer's claude runtime),
    * then layer the explicit `passthroughEnv` overrides on top so
    * the action layer can route through `ANTHROPIC_BASE_URL` etc.
    * without the runtime having to know which keys are
@@ -20760,13 +20760,26 @@ var ClaudeCodeValidatorRuntime = class {
    *
    * `process.env` is NOT spread: doing so would forward every
    * workflow secret (GITHUB_TOKEN, AWS_*, MINIMAX_API_KEY, etc.)
-   * to the CLI. The validator only needs the five keys below to
-   * route through the Anthropic-compatible endpoint.
+   * to the CLI. The validator only needs the allow-listed keys
+   * below to route through the Anthropic-compatible endpoint.
    *
    * `ANTHROPIC_API_KEY` is set to the empty string (NOT unset)
    * so Claude Code CLI's OAuth fallback is suppressed and the
    * endpoint routes via `ANTHROPIC_AUTH_TOKEN`. See project
    * memory #188.
+   *
+   * `PATH` is intentionally in the allow-list: the spawn calls
+   * `claude` (a bare command, not an absolute path), so the OS
+   * looks it up via `PATH`. Without `PATH` the spawn fails with
+   * `ENOENT`. `PATH` is the OS lookup path, not a secret — it
+   * carries the directory list, not credentials. Fall back to a
+   * POSIX-style default if the parent env somehow lost it so the
+   * spawn still finds `/usr/bin/claude` on a minimal runner.
+   *
+   * The merge order matters: `passthroughEnv` is spread AFTER
+   * `scopedEnv`, so a caller-supplied `PATH` overrides the
+   * default. When `passthroughEnv` is `undefined` (or empty),
+   * the scoped `PATH` wins.
    */
   buildEnvironment(passthroughEnv) {
     const scopedEnv = {
@@ -20775,7 +20788,8 @@ var ClaudeCodeValidatorRuntime = class {
       ANTHROPIC_API_KEY: "",
       ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL ?? "",
       CLAUDE_ENABLE_BYTE_WATCHDOG: "0",
-      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1",
+      PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin"
     };
     return { ...scopedEnv, ...passthroughEnv ?? {} };
   }
@@ -21036,6 +21050,14 @@ function invokeValidator(options) {
     prompt,
     timeoutMinutes: options.timeoutMinutes,
     disableTools: true
+    // No `passthroughEnv` is threaded through here on purpose: the
+    // opencode path inherits `PATH` from `process.env` via
+    // `OpenCodeRuntime.buildEnvironment` (which spreads
+    // `process.env` and only strips `OPENCODE_*` entries), so the
+    // spawn finds the `opencode` binary on PATH without any extra
+    // plumbing. The validator's claude path uses a separate
+    // passthrough env because `ClaudeCodeValidatorRuntime` builds
+    // a scoped allow-list and does NOT spread `process.env`.
   }).then((result) => ({
     text: result.text.trim(),
     tokens: { input: result.tokens.input, output: result.tokens.output },

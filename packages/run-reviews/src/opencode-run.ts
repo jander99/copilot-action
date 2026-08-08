@@ -142,6 +142,22 @@ export class OpenCodeRuntime implements ReviewRuntime {
   }
 
   buildEnvironment(options: ReviewRuntimeOptions): NodeJS.ProcessEnv {
+    // Unlike `ClaudeCodeRuntime`, this runtime deliberately spreads
+    // `process.env` so the opencode CLI inherits PATH (the spawn
+    // calls `opencode` as a bare command, so the OS resolves it via
+    // PATH) and HOME (opencode reads `~/.config/opencode` and
+    // similar paths under the user's home dir). The allow-list
+    // filter that strips workflow secrets is the Claude Code
+    // runtime's defense-in-depth; this runtime does not need it
+    // because opencode itself is read-only-by-config (the
+    // OPENCODE_PERMISSION deny-list below) and any secret in the
+    // env is gated by the opencode config, not the env block.
+    //
+    // Strip inherited OPENCODE_* entries first so a stale parent
+    // env does not leak an endpoint / token override past the
+    // merged config. The runtime then re-adds OPENCODE_CONFIG /
+    // OPENCODE_PERMISSION below; HOME / PATH (and everything else)
+    // are preserved.
     const env = { ...process.env };
     for (const name of Object.keys(env)) {
       if (name.startsWith('OPENCODE_')) {

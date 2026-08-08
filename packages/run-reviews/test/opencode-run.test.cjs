@@ -222,3 +222,52 @@ test('runOpenCodeRun falls back to argv when options.input is absent (back-compa
   // stdio[0] is 'ignore' when input is absent.
   assert.equal(spawnCalls[0].options.stdio[0], 'ignore');
 });
+
+test('runOpenCodeRun inherits PATH from process.env so the binary is resolvable', async () => {
+  // The opencode runtime spreads `process.env` and only strips
+  // `OPENCODE_*` entries, so PATH (and HOME, etc.) flow through
+  // unchanged. Without PATH the spawn fails with `ENOENT` (the
+  // same failure mode the reviewer hit when the env filter
+  // dropped PATH from the claude runtime's scoped env). This
+  // regression-guard bounds the regression where a future change
+  // accidentally switches the opencode runtime to a scoped env
+  // and forgets to include PATH.
+  const ORIGINAL_ENV = process.env;
+  process.env = {
+    ...ORIGINAL_ENV,
+    PATH: '/usr/local/bin:/usr/bin:/bin:/opt/hostedtoolcache',
+    GITHUB_TOKEN: 'should-not-be-special-cased',
+  };
+  try {
+    const { result, spawnCalls } = runWithEvents([
+      { type: 'result', part: { type: 'step-finish', reason: 'stop', tokens: { input: 1, output: 1 }, cost: 0 } },
+    ]);
+    await result;
+    const env = spawnCalls[0].options.env;
+    assert.equal(
+      env.PATH,
+      '/usr/local/bin:/usr/bin:/bin:/opt/hostedtoolcache',
+      'PATH must be forwarded from process.env so the OS can resolve the `opencode` binary',
+    );
+    // Inherited from process.env (the opencode runtime does not
+    // filter arbitrary entries; the OPENCODE_* allow-list is what
+    // governs secret leakage for opencode, not the env block).
+    assert.equal(env.GITHUB_TOKEN, 'should-not-be-special-cased');
+    // Stale OPENCODE_* entries must NOT survive the buildEnvironment
+    // pass — the merged config is the only source of truth.
+    assert.equal(env.OPENCODE_PERMISSION, JSON.stringify({
+      read: 'deny',
+      glob: 'deny',
+      grep: 'deny',
+      list: 'deny',
+      webfetch: 'deny',
+      edit: 'deny',
+      write: 'deny',
+      question: 'deny',
+      doom_loop: 'deny',
+      bash: { '*': 'ask', 'git log *': 'allow', 'git rev-parse *': 'allow' },
+    }));
+  } finally {
+    process.env = ORIGINAL_ENV;
+  }
+});

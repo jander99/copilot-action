@@ -150,6 +150,14 @@ function invokeValidator(options: InvokeValidatorOptions): Promise<InvokeValidat
     prompt,
     timeoutMinutes: options.timeoutMinutes,
     disableTools: true,
+    // No `passthroughEnv` is threaded through here on purpose: the
+    // opencode path inherits `PATH` from `process.env` via
+    // `OpenCodeRuntime.buildEnvironment` (which spreads
+    // `process.env` and only strips `OPENCODE_*` entries), so the
+    // spawn finds the `opencode` binary on PATH without any extra
+    // plumbing. The validator's claude path uses a separate
+    // passthrough env because `ClaudeCodeValidatorRuntime` builds
+    // a scoped allow-list and does NOT spread `process.env`.
   }).then((result) => ({
     text: result.text.trim(),
     tokens: { input: result.tokens.input, output: result.tokens.output },

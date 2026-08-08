@@ -285,12 +285,13 @@ test('runClaudeRun routes the prompt through stdin when options.input is set (E2
   assert.equal(spawnCalls[0].options.stdio[0], 'pipe', 'stdin must be a writable pipe');
 });
 
-test('buildEnvironment passes only the 5 claude-keys to the spawned process (no workflow secrets)', () => {
+test('buildEnvironment passes only the allow-listed keys to the spawned process (no workflow secrets)', () => {
   // Regression guard for the "forwarded secrets" reviewer finding:
   // `buildEnvironment` must NOT spread `process.env`. The review
-  // only needs the 5 keys required for the Anthropic-compatible
-  // endpoint. Even when arbitrary secrets are set in `process.env`,
-  // the spawn's env must not contain them.
+  // only needs the allow-listed keys (5 endpoint vars + the empty
+  // `ANTHROPIC_API_KEY` suppression + `PATH` for binary lookup).
+  // Even when arbitrary secrets are set in `process.env`, the
+  // spawn's env must not contain them.
   const ORIGINAL_ENV = process.env;
   // Plant a handful of secrets in `process.env`; the runtime
   // must NOT forward them.
@@ -307,13 +308,17 @@ test('buildEnvironment passes only the 5 claude-keys to the spawned process (no 
     const runtime = new ClaudeCodeRuntime();
     const env = runtime.buildEnvironment({});
 
-    // The 5 keys the review actually needs.
+    // The 5 endpoint keys the review actually needs.
     assert.ok('ANTHROPIC_BASE_URL' in env, 'ANTHROPIC_BASE_URL must be present');
     assert.ok('ANTHROPIC_AUTH_TOKEN' in env, 'ANTHROPIC_AUTH_TOKEN must be present');
     assert.ok('ANTHROPIC_API_KEY' in env, 'ANTHROPIC_API_KEY must be present (empty string suppresses OAuth fallback)');
     assert.ok('ANTHROPIC_MODEL' in env, 'ANTHROPIC_MODEL must be present');
     assert.ok('CLAUDE_ENABLE_BYTE_WATCHDOG' in env, 'CLAUDE_ENABLE_BYTE_WATCHDOG must be present');
     assert.ok('CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS' in env, 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS must be present');
+    // PATH is in the allow-list because the spawn calls `claude`
+    // (a bare command) and the OS resolves it via PATH. Without
+    // PATH, the spawn fails with ENOENT.
+    assert.ok('PATH' in env, 'PATH must be present so the OS can resolve the `claude` binary');
 
     // Empty defaults when the env vars are not set.
     assert.equal(env.ANTHROPIC_API_KEY, '');
@@ -328,27 +333,54 @@ test('buildEnvironment passes only the 5 claude-keys to the spawned process (no 
         `env must not contain ${key} (secret leak)`,
       );
     }
-    // The env is bounded: only the 6 keys above.
+    // The env is bounded: only the 7 allow-listed keys.
     assert.equal(
       Object.keys(env).sort().join(','),
-      ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL', 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS', 'CLAUDE_ENABLE_BYTE_WATCHDOG'].sort().join(','),
-      'env must contain exactly the 6 allow-listed keys (5 endpoint + 1 empty ANTHROPIC_API_KEY)',
+      ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL', 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS', 'CLAUDE_ENABLE_BYTE_WATCHDOG', 'PATH'].sort().join(','),
+      'env must contain exactly the 7 allow-listed keys (5 endpoint + empty ANTHROPIC_API_KEY + PATH)',
     );
   } finally {
     process.env = ORIGINAL_ENV;
   }
 });
 
-test('buildEnvironment forwards the 5 claude-keys when present in process.env', () => {
-  // The runtime reads ANTHROPIC_* and CLAUDE_* from process.env
-  // as the action layer's "passthrough" surface. The runtime does
-  // NOT read arbitrary workflow secrets.
+test('buildEnvironment sets PATH to a non-empty value (binary lookup regression guard)', () => {
+  // Regression guard for the `spawn claude ENOENT` failure mode
+  // (job 93144182882): when the env filter dropped PATH from the
+  // scoped env, the spawn couldn't find `claude` on the runner.
+  // The runtime must keep PATH in the allow-list so the binary is
+  // resolvable. PATH is a directory list, not a secret; the
+  // allow-list does NOT weaken the secrets-leak defense.
+  const ORIGINAL_ENV = process.env;
+  // Real runner PATH: use the live process.env.PATH when present,
+  // so we assert the spawn receives the same PATH the parent
+  // shell has. This is what makes the binary resolvable.
+  const originalPath = ORIGINAL_ENV.PATH;
+  process.env = { ...ORIGINAL_ENV, PATH: '/usr/local/bin:/usr/bin:/bin:/opt/hostedtoolcache' };
+  try {
+    const runtime = new ClaudeCodeRuntime();
+    const env = runtime.buildEnvironment({});
+    assert.ok(typeof env.PATH === 'string' && env.PATH.length > 0, 'PATH must be a non-empty string');
+    // The forward is exact — what the parent has is what the child gets.
+    assert.equal(env.PATH, process.env.PATH);
+  } finally {
+    process.env = ORIGINAL_ENV;
+    // Sanity: original PATH was non-empty on every supported runner.
+    assert.ok(originalPath, 'test precondition: runner must have a non-empty PATH');
+  }
+});
+
+test('buildEnvironment forwards the allow-listed claude-keys when present in process.env', () => {
+  // The runtime reads ANTHROPIC_*, CLAUDE_*, and PATH from
+  // process.env as the action layer's "passthrough" surface. The
+  // runtime does NOT read arbitrary workflow secrets.
   const ORIGINAL_ENV = process.env;
   process.env = {
     ...ORIGINAL_ENV,
     ANTHROPIC_BASE_URL: 'https://api.minimax.io/anthropic',
     ANTHROPIC_AUTH_TOKEN: 'token-abc',
     ANTHROPIC_MODEL: 'MiniMax-M3',
+    PATH: '/usr/local/bin:/usr/bin:/bin:/opt/hostedtoolcache',
     // These are NOT in the allow-list — they must NOT leak.
     GITHUB_TOKEN: 'should-not-leak',
     AWS_SECRET_ACCESS_KEY: 'should-not-leak',
@@ -362,6 +394,7 @@ test('buildEnvironment forwards the 5 claude-keys when present in process.env', 
     assert.equal(env.ANTHROPIC_API_KEY, '');
     assert.equal(env.CLAUDE_ENABLE_BYTE_WATCHDOG, '0');
     assert.equal(env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS, '1');
+    assert.equal(env.PATH, '/usr/local/bin:/usr/bin:/bin:/opt/hostedtoolcache');
     assert.equal(env.GITHUB_TOKEN, undefined, 'GITHUB_TOKEN must not leak');
     assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined, 'AWS_SECRET_ACCESS_KEY must not leak');
   } finally {
