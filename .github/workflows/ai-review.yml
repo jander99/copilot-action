@@ -70,3 +70,78 @@ jobs:
           path: ${{ steps.review.outputs.debug-artifact-path }}
           if-no-files-found: ignore
           retention-days: 7
+
+  # Parallel test job: same review contract, but invoked via the Claude
+  # Code CLI runtime (`tool: claude`). Runs alongside the opencode job
+  # so we can compare outputs and CI behavior side-by-side without the
+  # claude path posting comments to PRs yet.
+  #
+  # This job is intentionally silent (`post-comment: false`) so reviewers
+  # on PRs don't see two comments per run. The debug artifact is the
+  # primary signal until we're ready to enable comments for the claude
+  # path.
+  review-claude:
+    if: >-
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Claude Code CLI
+        # The action's claude runtime shells out to `claude --print ...`,
+        # so the binary must be on PATH. npm install is non-interactive
+        # and works reliably in CI (the curl installer can prompt or
+        # require a TTY).
+        run: npm install -g @anthropic-ai/claude-code
+
+      - name: AI Review (claude, silent)
+        id: review-claude
+        uses: ./packages/root-action
+        with:
+          tool: claude
+          # The model input MUST be in `provider/model` form when
+          # `tool: claude`; the action strips the provider prefix before
+          # passing to `--model`. `anthropic/MiniMax-M3` → `MiniMax-M3`
+          # is what Claude Code CLI expects against Minimax's
+          # Anthropic-compatible endpoint.
+          model: anthropic/MiniMax-M3
+          prompts: file:examples/prompts/code-review.md,file:examples/prompts/security-review.md
+          debug: true
+          fail-on-error: false
+          # Silent: do not post a PR comment for the claude path yet.
+          post-comment: false
+          github-token: ${{ github.token }}
+        env:
+          # Minimax's Anthropic-compatible endpoint expects
+          # `Authorization: Bearer`, but Claude Code CLI sends `x-api-key`.
+          # Workaround: use ANTHROPIC_AUTH_TOKEN for the Bearer value, and
+          # set ANTHROPIC_API_KEY="" (empty string, NOT unset) to suppress
+          # Claude Code's OAuth fallback behavior. See
+          # https://platform.minimax.io/docs/token-plan/claude-code
+          ANTHROPIC_BASE_URL: https://api.minimax.io/anthropic
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.MINIMAX_API_KEY }}
+          ANTHROPIC_API_KEY: ""
+          ANTHROPIC_MODEL: MiniMax-M3
+          # Minimax rejects Claude Code's experimental beta headers and
+          # its byte-level streaming watchdog; both flags disable that.
+          CLAUDE_ENABLE_BYTE_WATCHDOG: 0
+          CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: 1
+          # PATH is intentionally not overridden: `npm install -g` puts
+          # `claude` in `/usr/local/bin/`, which is already on the
+          # runner's default PATH. Overriding PATH here previously
+          # evaluated `${{ env.HOME }}` to empty in this context,
+          # producing `/bin:` (no `/usr/local/bin`), which masked the
+          # npm-installed binary.
+
+      - name: Upload debug artifacts (claude)
+        if: always() && steps.review-claude.outputs.debug-artifact-path != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-review-debug-claude
+          path: ${{ steps.review-claude.outputs.debug-artifact-path }}
+          if-no-files-found: ignore
+          retention-days: 7

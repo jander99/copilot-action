@@ -1,13 +1,15 @@
 # AI Review Action
 
-AI Review Action runs repository reviews through the OpenCode CLI using provider API keys supplied by your workflow. It supports one or many models and prompts, deterministic merging of multiple reviews into one canonical document, cost and token reporting, PR comments, non-PR check runs, user-composed OpenCode configuration, and opt-in debug capture.
+AI Review Action runs repository reviews through either the OpenCode CLI or the Claude Code CLI (selected via the `tool` input) using provider API keys supplied by your workflow. It supports one or many models and prompts, deterministic merging of multiple reviews into one canonical document, cost and token reporting, PR comments, non-PR check runs, user-composed OpenCode configuration, and opt-in debug capture.
 
 ## Prerequisites
 
 - A **Linux x64** runner. macOS, Windows, Linux arm64, and other platforms are not supported.
 - `actions/checkout@v6` with `fetch-depth: 0` so the model can inspect the complete Git history and base ref.
 - `git`, `bash`, `tar`, `curl`, and Node/npm tooling on `PATH`. `ubuntu-latest` provides these; Node 22+ is recommended when installing skills with `npx`.
-- OpenCode installed by the standalone [`setup-opencode`](#opencode-installation) action with the SHA-256 checksum of the exact release archive.
+- The chosen reviewer CLI installed as a separate workflow step before this action:
+  - For `tool: opencode` (default): install OpenCode with the standalone [`setup-opencode`](#opencode-installation) action and pin its SHA-256 checksum.
+  - For `tool: claude`: install the Claude Code CLI (e.g., via `@anthropic-ai/claude-code`'s installer or a custom step). Standard Anthropic users expose `ANTHROPIC_API_KEY`; users routing through an Anthropic-compatible endpoint (e.g. Minimax) expose `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` instead (see `ANTHROPIC_API_KEY handling` below).
 - At least one provider credential exposed as an environment variable.
 - A prompt using the `file:` or `text:` prefix.
 
@@ -82,7 +84,7 @@ The examples use `@v1` for readability. In production, resolve the `v1` release 
 ```
 
 1. The workflow owns checkout, credentials, prompts, skills, MCPs, plugins, and optional user configuration.
-2. `setup-opencode` installs the exact requested OpenCode version only after the supplied archive checksum matches.
+2. `setup-opencode` (or an equivalent Claude Code installer step) installs the exact requested CLI version only after the supplied archive checksum matches.
 3. The root action (`packages/root-action`) is a single JavaScript bundle. It drives `run-reviews`, `validate-review`, `post-comment`, `post-check-run`, and `post-error-comment` programmatically, so the action works when invoked as `owner/repo@ref` (not just from a checked-out workspace). The packages remain available as standalone sub-actions for callers who want fine-grained composition.
 
 The action does not materialize a diff. It injects event and ref context into the action-owned agent definition, and the model uses Git to decide what to review.
@@ -93,15 +95,17 @@ These are all inputs accepted by the root `jander99/ai-review-action` action.
 
 | Input | Required | Default | Description |
 |---|---:|---|---|
-| `opencode-version` | No | `1.18.4` | Exact version expected from `opencode --version`. Installation remains the workflow's responsibility. |
-| `debug` | No | `false` | Capture OpenCode stdout/stderr, apply best-effort redaction, gzip the files, and upload the `ai-review-debug` artifact for 7 days. |
+| `tool` | No | `opencode` | Reviewer CLI to invoke. `opencode` runs the OpenCode CLI; `claude` runs the Claude Code CLI. The `model` input must be in `provider/model` format; for `claude` the provider portion is stripped before being passed as `--model`. |
+| `opencode-version` | No | `1.18.4` | Exact version expected from `opencode --version`. Only consulted when `tool: opencode`. Installation remains the workflow's responsibility. |
+| `claude-version` | No | Empty | Expected Claude Code CLI version. Only consulted when `tool: claude`. When empty, the action only verifies the `claude` binary is on PATH without pinning a specific version. |
+| `debug` | No | `false` | Capture reviewer CLI stdout/stderr, apply best-effort redaction, gzip the files, and upload the `ai-review-debug` artifact for 7 days. |
 | `github-token` | No | `${{ github.token }}` | Token used to publish a PR comment or check run. Its permissions must match the event. |
-| `model` | No | `anthropic/claude-sonnet-4.6` | Single OpenCode model in `provider/model` form. Used when `models` is empty. |
-| `models` | No | Empty | Comma-separated OpenCode models. When set, this overrides `model`. |
+| `model` | No | `anthropic/claude-sonnet-4.6` | Single model in `provider/model` form. For `tool: opencode` the full string is passed to `--model`; for `tool: claude` the provider portion is stripped. Used when `models` is empty. |
+| `models` | No | Empty | Comma-separated models. When set, this overrides `model`. Same `provider/model` formatting rules apply per `tool`. |
 | `prompts` | **Yes** | None | Comma-separated prompt sources. Each entry must begin with `file:` or `text:`. |
-| `opencode-config` | No | None | Path to a user-provided `opencode.json` or `opencode.jsonc` to merge into the isolated action configuration. |
-| `permission` | No | [Explicit per-tool defaults](#default-tool-permissions) | JSON object replacing the OpenCode permission block. |
-| `timeout-minutes` | No | `30` | Timeout for each review invocation. Must be a positive integer. |
+| `opencode-config` | No | None | Path to a user-provided `opencode.json` or `opencode.jsonc` to merge into the isolated action configuration. Only consulted when `tool: opencode`; ignored for `tool: claude`. |
+| `permission` | No | [Explicit per-tool defaults](#default-tool-permissions) | JSON object replacing the OpenCode permission block. Only consulted when `tool: opencode`; Claude Code uses hardcoded `--allowedTools` instead. |
+| `timeout-minutes` | No | `30` | Timeout for each reviewer invocation. Must be a positive integer. |
 | `fail-on-error` | No | `false` | Fail the step when any review operation fails. Setup and validation failures always fail. |
 | `post-comment` | No | `true` | Publish on `pull_request` events. Set to `false` to consume outputs without commenting. |
 | `post-check-run` | No | `true` | Publish on non-PR events. Set to `false` to consume outputs without creating a check run. |
@@ -426,6 +430,48 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
+### Claude Code runtime
+
+Run the same pipeline through the Claude Code CLI by selecting `tool: claude`. The `model` input stays in `provider/model` format; the dispatcher strips the `provider/` prefix before passing the model id to Claude Code's `--model` flag.
+
+```yaml
+name: AI Review (Claude Code)
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      # Install the Claude Code CLI in a workflow step the caller
+      # controls. The action itself only verifies the `claude`
+      # binary is on PATH (or matches `claude-version` when set).
+      - run: npm install -g @anthropic-ai/claude-code
+
+      - uses: jander99/ai-review-action@v1
+        with:
+          tool: claude
+          model: anthropic/claude-sonnet-4.6
+          prompts: file:examples/prompts/code-review.md
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+```
+
+Notes on the Claude Code runtime:
+
+- The `model` input MUST be in `provider/model` form. The provider prefix is stripped before being passed to `--model` so the CLI receives e.g. `claude-sonnet-4.6`.
+- `opencode-config`, `permission`, and `opencode-version` are ignored when `tool: claude`. Claude Code uses hardcoded `--allowedTools` for read-only inspection plus the same read-only git subset OpenCode allows.
+- Set `claude-version` to pin a specific release; leave it empty to only verify the `claude` binary is present.
+- The validator is opencode-only and currently rejects Claude Code reviews with a `config-json input is required` message. Treat the validator output as informational until a future change lets `tool: claude` skip the validator cleanly.
+
 ### Push to the default branch
 
 Publish the result as a check run named `ai-review` because no pull request is associated with the event.
@@ -463,11 +509,11 @@ jobs:
 
 ## Supported providers
 
-Credentials are environment variables, not action inputs. Native providers are discovered by OpenCode. The action adds built-in configuration for the listed custom providers when their credential environment is present.
+Credentials are environment variables, not action inputs. Native providers are discovered by OpenCode (for `tool: opencode`) or routed through the Claude Code CLI (for `tool: claude`). The action adds built-in configuration for the listed custom providers when their credential environment is present.
 
 | Provider | Integration | Environment variables |
 |---|---|---|
-| Anthropic | OpenCode native | `ANTHROPIC_API_KEY` |
+| Anthropic | OpenCode native (and Claude Code CLI for `tool: claude`) | `ANTHROPIC_API_KEY` |
 | OpenAI | OpenCode native | `OPENAI_API_KEY` |
 | Google Gemini | OpenCode native | `GEMINI_API_KEY` |
 | GitHub Copilot through OpenCode | OpenCode native | `GITHUB_TOKEN` with the required Copilot access |
@@ -475,9 +521,20 @@ Credentials are environment variables, not action inputs. Native providers are d
 | Kimi / Moonshot | Built-in custom provider | `KIMI_API_KEY` or `MOONSHOT_API_KEY` |
 | AWS Bedrock | Built-in custom provider | `AWS_BEARER_TOKEN_BEDROCK`, or standard AWS variables such as `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, or `AWS_WEB_IDENTITY_TOKEN_FILE`; region from `AWS_REGION`/`AWS_DEFAULT_REGION` |
 | Google Vertex Anthropic | Built-in custom provider | `GOOGLE_APPLICATION_CREDENTIALS`; project from `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`, or `GCP_PROJECT`; location from `GOOGLE_CLOUD_LOCATION` |
-| Other providers | User-defined through `opencode-config` | Any `{env:USER_DEFINED_VAR}` referenced by that configuration |
+| Other providers | User-defined through `opencode-config` (opencode only) | Any `{env:USER_DEFINED_VAR}` referenced by that configuration |
 
-For built-in providers, the merged configuration references secrets with OpenCode's `{env:VAR}` syntax rather than embedding key values.
+For built-in providers, the merged configuration references secrets with OpenCode's `{env:VAR}` syntax rather than embedding key values. For `tool: claude`, the action passes `ANTHROPIC_*` environment variables through unchanged so the caller can also route through `ANTHROPIC_BASE_URL` to any Anthropic-compatible endpoint.
+
+### `ANTHROPIC_API_KEY` handling for `tool: claude`
+
+The Claude Code CLI's authentication behavior depends on two env vars: `ANTHROPIC_API_KEY` (the standard key) and `ANTHROPIC_BASE_URL` (a third-party routing signal). When `ANTHROPIC_BASE_URL` is set, the action force-empties `ANTHROPIC_API_KEY` so Claude Code's OAuth-fallback is suppressed and the endpoint routes via `ANTHROPIC_AUTH_TOKEN` (Bearer auth). When `ANTHROPIC_BASE_URL` is unset, the action passes the user's real `ANTHROPIC_API_KEY` through untouched so standard Anthropic users get the expected auth flow.
+
+| `ANTHROPIC_BASE_URL` | `ANTHROPIC_API_KEY` forwarded as | Why |
+|---|---|---|
+| unset (or empty string) | `process.env.ANTHROPIC_API_KEY` (or `''` if not set) | Standard Anthropic users. The CLI uses the supplied key normally. |
+| set (e.g. `https://api.minimax.io/anthropic`) | `''` (empty string) | Third-party Anthropic-compatible endpoints. The empty string suppresses Claude Code's OAuth fallback; auth comes via `ANTHROPIC_AUTH_TOKEN` (Bearer). |
+
+This is conditional on the **presence** of `ANTHROPIC_BASE_URL`, not on its actual value. Setting `ANTHROPIC_BASE_URL` to any non-empty string flips the action into third-party-routing mode. Standard Anthropic users leave `ANTHROPIC_BASE_URL` unset and the action forwards their real `ANTHROPIC_API_KEY` unchanged.
 
 ## OpenCode installation
 
@@ -510,6 +567,8 @@ The action sets a deny-list `OPENCODE_PERMISSION` JSON before spawning the OpenC
 In OpenCode's permission resolver, **tool names not listed in the JSON default to allowed**. So MCP server tools (e.g. `codegraph_explore`, `codegraph_search`) and any user-added plugin tools work out of the box. The baked-in review prompt forbids the model from using `task`/`todowrite` under non-agentic invocation — see `REVIEW_AGENT_PROMPT_TEMPLATE` — but the permission layer stays extensible.
 
 To restrict an MCP tool that the model should not reach, the consumer's `opencode-config` input can override `OPENCODE_PERMISSION` with explicit allow/deny entries for those tool names.
+
+For `tool: claude`, the action hardcodes `--dangerously-skip-permissions` and an `--allowedTools` allow-list that mirrors the read-only git subset above (`Read`, `Glob`, `Grep`, `Bash(git diff *)`, `Bash(git show *)`, `Bash(git log *)`, `Bash(git rev-parse *)`, plus `query` for Claude Code's internal structured-prompt tool). The user-supplied `permission` input is ignored for this runtime.
 
 ## Security
 

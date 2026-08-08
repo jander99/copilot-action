@@ -34,23 +34,6 @@ export type {
   RunReviewsResult,
 } from './main';
 
-// Shared one-shot OpenCode CLI transport. The validator package uses this
-// entry point so reviewer and validator invocations share process handling,
-// NDJSON parsing, timeout enforcement, and debug capture.
-export { runOpenCodeRun } from './opencode-run';
-export type {
-  DebugCapturePaths,
-  OpenCodeRunRuntime,
-  RunOpenCodeRunOptions,
-  RunOpenCodeRunResult,
-} from './opencode-run';
-
-// Reviewer wrapper. Implemented by the root action's main loop;
-// exported here so tests can drive the two-call retry path directly
-// without going through `runReviews`.
-export { invokeOpenCode } from './opencode';
-export type { InvokeOpenCodeOptions, InvokeOpenCodeRuntime } from './opencode';
-
 // Agent definition builder. Re-exported so tests can exercise the
 // `__DIFF__` placeholder substitution without going through the full
 // review pipeline.
@@ -62,3 +45,41 @@ export {
 } from './agent-definition';
 export type { BuildAgentDefinitionOptions } from './agent-definition';
 export type { EventContext } from './types';
+
+// Review runtime abstraction. The dispatcher in `./opencode.ts`
+// picks between the two CLI implementations based on `RunReviewsOptions.tool`.
+export { OpenCodeRuntime } from './opencode-run';
+export { ClaudeCodeRuntime } from './claude-run';
+export { runReview } from './runtime';
+export type {
+  DebugCapturePaths,
+  ReviewRuntime,
+  ReviewRuntimeOptions,
+  ReviewRuntimeResult,
+  ReviewRuntimeSpawn,
+  ReviewTool,
+} from './runtime';
+
+// Back-compat: the validator package and existing tests still call
+// `runOpenCodeRun` directly. The dispatcher (`invokeReview`) is the
+// preferred entry point for new code.
+export { runOpenCodeRun } from './opencode-run';
+export type {
+  OpenCodeRunRuntime,
+  RunOpenCodeRunOptions,
+  RunOpenCodeRunResult,
+} from './opencode-run';
+export { runClaudeRun } from './claude-run';
+export type { RunClaudeRunOptions, RunClaudeRunResult } from './claude-run';
+
+// Dispatcher + back-compat entry points. `invokeOpenCode` is kept as
+// a thin wrapper around `invokeReview(..., 'opencode')` so any
+// internal callers continue to work without modification. The wrapper
+// also applies the two-call retry for the no-heading and format-invalid
+// cases (see `./opencode.ts` for the retry details).
+export { invokeReview, invokeOpenCode, formatReviewDocumentIssues } from './opencode';
+export type {
+  InvokeOpenCodeOptions,
+  InvokeOpenCodeRuntime,
+  InvokeReviewOptions,
+} from './opencode';

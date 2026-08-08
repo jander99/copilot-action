@@ -1,7 +1,7 @@
 import * as core from '@actions/core';
 import { context } from '@actions/github';
 import { runReviews } from '@jander99/ai-review-run-reviews';
-import type { RunReviewsOptions, RunReviewsResult } from '@jander99/ai-review-run-reviews';
+import type { RunReviewsOptions, RunReviewsResult, ReviewTool } from '@jander99/ai-review-run-reviews';
 import { validateReview } from '@jander99/ai-review-validate-review';
 import type { ValidateReviewOptions, ValidateReviewResult } from '@jander99/ai-review-validate-review';
 import { postComment } from '@jander99/ai-review-post-comment';
@@ -108,8 +108,20 @@ function roundCost(value: number): string {
 }
 
 function buildRunReviewsOptions(): RunReviewsOptions {
+  // `tool` is read once at the wrapper boundary; an invalid value
+  // raises here (before runReviews is invoked) so the action log
+  // surfaces the typo cleanly instead of the runtime failing later.
+  const rawTool = (core.getInput('tool') || 'opencode').trim().toLowerCase();
+  if (rawTool !== 'opencode' && rawTool !== 'claude') {
+    throw new Error(
+      `tool input must be 'opencode' or 'claude'; received '${core.getInput('tool') || '<empty>'}'`,
+    );
+  }
+  const tool: ReviewTool = rawTool === 'claude' ? 'claude' : 'opencode';
   return {
+    tool,
     opencodeVersion: core.getInput('opencode-version') || DEFAULT_OPENCODE_VERSION,
+    claudeVersion: core.getInput('claude-version') || undefined,
     debug: getBooleanInput('debug'),
     model: core.getInput('model') || DEFAULT_MODEL,
     modelsInput: core.getInput('models'),
@@ -122,13 +134,61 @@ function buildRunReviewsOptions(): RunReviewsOptions {
   };
 }
 
-function buildValidateReviewOptions(reviewPath: string, model: string, passedConfigJson: string): ValidateReviewOptions {
+/**
+ * Build the env block the validator's claude runtime needs. Mirrors
+ * the env block the reviewer uses for its claude invocation (see the
+ * `review-claude` job in `.github/workflows/ai-review.yml`): when the
+ * claude binary is routed through Minimax's Anthropic-compatible
+ * endpoint, three switches make it work — an empty
+ * `ANTHROPIC_API_KEY` suppresses Claude Code's OAuth fallback, an
+ * `ANTHROPIC_AUTH_TOKEN` carries the Bearer credential the endpoint
+ * expects, and the two `CLAUDE_*` flags disable experimental beta
+ * headers and the byte-level streaming watchdog Minimax rejects.
+ *
+ * Centralizing the env here (rather than hardcoding it in the
+ * validator package) keeps the action layer as the single source
+ * of truth for how to reach the model endpoint. Callers that don't
+ * pass these vars get the original `process.env` via
+ * `runClaudeValidator`'s pass-through merge.
+ */
+function buildClaudePassthroughEnv(): NodeJS.ProcessEnv {
   return {
+    ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? '',
+    ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN ?? '',
+    // Set to empty string (NOT unset) so Claude Code CLI's OAuth
+    // fallback is suppressed and the endpoint routes via
+    // ANTHROPIC_AUTH_TOKEN. See project memory #188.
+    ANTHROPIC_API_KEY: '',
+    CLAUDE_ENABLE_BYTE_WATCHDOG: '0',
+    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+  };
+}
+
+function buildValidateReviewOptions(
+  reviewPath: string,
+  model: string,
+  passedConfigJson: string,
+  tool: ReviewTool,
+): ValidateReviewOptions {
+  // `tool` is plumbed through from `RunReviewsOptions.tool` (set by
+  // the reviewer's own input parsing) so the validator runtime
+  // matches the reviewer's runtime. The reviewer routes through
+  // opencode when tool=opencode and claude when tool=claude; the
+  // validator now does the same instead of always running opencode.
+  //
+  // The passthroughEnv is built unconditionally so the
+  // `opencode` path is byte-identical to the pre-doubling behavior
+  // (the opencode runtime ignores it) AND the `claude` path gets
+  // the env it needs without the action layer having to branch on
+  // tool.
+  return {
+    tool,
     opencodeVersion: core.getInput('opencode-version') || DEFAULT_OPENCODE_VERSION,
     reviewPath,
     model,
     timeoutMinutes: 5,
     passedConfigJson,
+    passthroughEnv: buildClaudePassthroughEnv(),
   };
 }
 
@@ -378,6 +438,7 @@ export async function runWithDeps(deps: RunDeps): Promise<void> {
           reviewResult.reviewOutputPath,
           reviewResult.effectiveModel || reviewOptions.model,
           reviewResult.configJson,
+          reviewOptions.tool,
         ),
       );
     } catch (error) {

@@ -1,10 +1,11 @@
 name: 'AI Review'
 description: >-
-  AI-powered repository reviews using the OpenCode CLI with user-provided
-  models and prompts. OpenCode must be installed first with the standalone
-  setup-opencode action. This action requires `pull-requests: write` for
-  pull_request events and `checks: write` for non-PR events (push,
-  workflow_dispatch).
+  AI-powered repository reviews. Selects between the OpenCode CLI
+  (`tool: opencode`, default) and the Claude Code CLI (`tool: claude`)
+  at the action boundary; the rest of the pipeline is shared. The
+  chosen runtime CLI must be installed before this action runs.
+  This action requires `pull-requests: write` for pull_request events
+  and `checks: write` for non-PR events (push, workflow_dispatch).
 author: 'jander99'
 
 branding:
@@ -12,40 +13,69 @@ branding:
   color: blue
 
 inputs:
+  tool:
+    description: >-
+      Review runtime CLI. `opencode` (default) invokes the OpenCode CLI;
+      `claude` invokes the Claude Code CLI. The `model` input must be in
+      `provider/model` format; for `claude`, the provider portion is stripped
+      before being passed as `--model`.
+    required: false
+    default: 'opencode'
   opencode-version:
-    description: 'OpenCode version expected to already be installed on PATH.'
+    description: >-
+      OpenCode version expected to already be installed on PATH. Only
+      consulted when `tool: opencode`.
     required: false
     default: '1.18.4'
+  claude-version:
+    description: >-
+      Expected Claude Code CLI version. Only consulted when `tool: claude`.
+      When empty, the action only verifies the `claude` binary is on PATH
+      without pinning a specific version.
+    required: false
+    default: ''
   debug:
-    description: 'Capture redacted, gzipped OpenCode stdout and stderr as an artifact.'
+    description: 'Capture redacted, gzipped CLI stdout and stderr as an artifact.'
     required: false
     default: 'false'
   github-token:
     description: >-
       GITHUB_TOKEN or fine-grained PAT for posting results (falls back to
-      github.token when omitted). Run setup-opencode as a separate workflow
-      step before this action. Requires `pull-requests: write` for
-      pull_request events and `checks: write` for non-PR events.
+      github.token when omitted). Install the chosen runtime CLI as a
+      separate workflow step before this action. Requires
+      `pull-requests: write` for pull_request events and `checks: write`
+      for non-PR events.
     required: false
   model:
-    description: 'OpenCode model in provider/model format.'
+    description: >-
+      Model in `provider/model` format. For `tool: opencode`, the full
+      string is passed to OpenCode as `--model`. For `tool: claude`, the
+      provider portion is stripped (e.g., `anthropic/claude-sonnet-4.6`
+      becomes `claude-sonnet-4.6`).
     required: false
     default: 'anthropic/claude-sonnet-4.6'
   models:
-    description: 'Comma-separated OpenCode models; overrides model when set.'
+    description: >-
+      Comma-separated models; overrides `model` when set. The same
+      `provider/model` formatting rules apply per `tool`.
     required: false
     default: ''
   prompts:
     description: 'Comma-separated prompt sources using file: or text: prefixes.'
     required: true
   opencode-config:
-    description: 'Path to a user-provided OpenCode config.'
+    description: >-
+      Path to a user-provided OpenCode config. Only consulted when
+      `tool: opencode`; ignored for `tool: claude`.
     required: false
   permission:
-    description: 'JSON object defining OpenCode tool permissions.'
+    description: >-
+      JSON object defining OpenCode tool permissions. Only consulted when
+      `tool: opencode`; ignored for `tool: claude` (Claude Code uses
+      hardcoded `--allowedTools`).
     required: false
   timeout-minutes:
-    description: 'Timeout for each OpenCode invocation.'
+    description: 'Timeout for each CLI invocation.'
     required: false
     default: '30'
   fail-on-error:
@@ -60,8 +90,8 @@ inputs:
     default: 'true'
   post-check-run:
     description: >-
-      Post the review as a check run (non-PR events only). Set to false
-      to only expose outputs without publishing.
+      Post the review as a check run (non-PR events only). Set to false to
+      only expose outputs without publishing.
     required: false
     default: 'true'
   max-comment-chars:

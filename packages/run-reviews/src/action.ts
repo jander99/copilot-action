@@ -1,5 +1,6 @@
 import * as core from '@actions/core';
 import { runReviews, type RunReviewsOptions, type RunReviewsResult } from './main';
+import type { ReviewTool } from './opencode';
 import { DEFAULT_PERMISSION } from './permissions';
 import type { Permission } from './types';
 
@@ -18,9 +19,27 @@ function readPermissionInput(input: string): Permission {
   return parsed as Permission;
 }
 
+/**
+ * Resolve the `tool` input to a known runtime identifier. The
+ * `tool` input defaults to `'opencode'` for back-compat; any other
+ * value is rejected up-front so a typo surfaces as a clear error
+ * rather than silently dispatching to the wrong CLI.
+ */
+function readToolInput(input: string): ReviewTool {
+  const raw = (input || 'opencode').trim().toLowerCase();
+  if (raw === 'opencode' || raw === 'claude') {
+    return raw;
+  }
+  throw new Error(
+    `tool input must be 'opencode' or 'claude'; received '${input || '<empty>'}'`,
+  );
+}
+
 function buildOptionsFromCore(): RunReviewsOptions {
   return {
+    tool: readToolInput(core.getInput('tool')),
     opencodeVersion: core.getInput('opencode-version') || DEFAULT_OPENCODE_VERSION,
+    claudeVersion: core.getInput('claude-version') || undefined,
     debug: core.getBooleanInput('debug'),
     model: core.getInput('model') || DEFAULT_MODEL,
     modelsInput: core.getInput('models'),

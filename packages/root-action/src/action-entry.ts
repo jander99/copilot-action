@@ -15,7 +15,7 @@
 import * as core from '@actions/core';
 import { context } from '@actions/github';
 import { runReviews } from '@jander99/ai-review-run-reviews';
-import type { RunReviewsOptions, RunReviewsResult } from '@jander99/ai-review-run-reviews';
+import type { RunReviewsOptions, RunReviewsResult, ReviewTool } from '@jander99/ai-review-run-reviews';
 import { validateReview } from '@jander99/ai-review-validate-review';
 import type { ValidateReviewOptions, ValidateReviewResult } from '@jander99/ai-review-validate-review';
 import { postComment } from '@jander99/ai-review-post-comment';
@@ -105,8 +105,20 @@ function roundCost(value: number): string {
 }
 
 function buildRunReviewsOptions(): RunReviewsOptions {
+  // Mirror packages/root-action/src/main.ts: validate `tool` once
+  // at the wrapper boundary so a typo surfaces here instead of
+  // failing inside the runtime.
+  const rawTool = (core.getInput('tool') || 'opencode').trim().toLowerCase();
+  if (rawTool !== 'opencode' && rawTool !== 'claude') {
+    throw new Error(
+      `tool input must be 'opencode' or 'claude'; received '${core.getInput('tool') || '<empty>'}'`,
+    );
+  }
+  const tool: ReviewTool = rawTool === 'claude' ? 'claude' : 'opencode';
   return {
+    tool,
     opencodeVersion: core.getInput('opencode-version') || DEFAULT_OPENCODE_VERSION,
+    claudeVersion: core.getInput('claude-version') || undefined,
     debug: getBooleanInput('debug'),
     model: core.getInput('model') || DEFAULT_MODEL,
     modelsInput: core.getInput('models'),
@@ -119,13 +131,44 @@ function buildRunReviewsOptions(): RunReviewsOptions {
   };
 }
 
-function buildValidateReviewOptions(reviewPath: string, model: string, passedConfigJson: string): ValidateReviewOptions {
+/**
+ * Build the env block the validator's claude runtime needs. Mirrors
+ * the env block the reviewer uses for its claude invocation; see
+ * `.github/workflows/ai-review.yml` and project memory #188 for the
+ * Bearer-vs-x-api-key workaround. Centralizing the env at the action
+ * layer keeps the validator package from having to know which
+ * endpoint keys matter.
+ */
+function buildClaudePassthroughEnv(): NodeJS.ProcessEnv {
   return {
+    ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL ?? '',
+    ANTHROPIC_AUTH_TOKEN: process.env.ANTHROPIC_AUTH_TOKEN ?? '',
+    ANTHROPIC_API_KEY: '',
+    CLAUDE_ENABLE_BYTE_WATCHDOG: '0',
+    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+  };
+}
+
+function buildValidateReviewOptions(
+  reviewPath: string,
+  model: string,
+  passedConfigJson: string,
+  tool: ReviewTool,
+): ValidateReviewOptions {
+  // `tool` is plumbed through from `RunReviewsOptions.tool` so the
+  // validator runtime matches the reviewer's runtime. The passthrough
+  // env is built unconditionally so the opencode path stays
+  // byte-identical to pre-doubling behavior (the opencode runtime
+  // ignores it) AND the claude path gets the env it needs without
+  // the action layer having to branch on tool.
+  return {
+    tool,
     opencodeVersion: core.getInput('opencode-version') || DEFAULT_OPENCODE_VERSION,
     reviewPath,
     model,
     timeoutMinutes: 5,
     passedConfigJson,
+    passthroughEnv: buildClaudePassthroughEnv(),
   };
 }
 
@@ -339,6 +382,7 @@ export async function runWithDeps(deps: RunDeps): Promise<void> {
           reviewResult.reviewOutputPath,
           reviewResult.effectiveModel || reviewOptions.model,
           reviewResult.configJson,
+          reviewOptions.tool,
         ),
       );
     } catch (error) {

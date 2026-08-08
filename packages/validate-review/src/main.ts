@@ -5,6 +5,10 @@ import * as path from 'path';
 import { VALIDATOR_AGENT_PROMPT_TEMPLATE } from '@jander99/ai-review-review-contract';
 import { runOpenCodeRun } from '@jander99/ai-review-run-reviews';
 import { validateReviewDocument } from './structure';
+import { runClaudeValidator, type ClaudeCodeValidatorRuntime } from './claude-validate';
+
+export type ValidatorTool = 'opencode' | 'claude';
+export type { ClaudeCodeValidatorRuntime };
 
 const DEFAULT_OPENCODE_VERSION = '1.18.4';
 const DEFAULT_TIMEOUT_MINUTES = 5;
@@ -146,6 +150,14 @@ function invokeValidator(options: InvokeValidatorOptions): Promise<InvokeValidat
     prompt,
     timeoutMinutes: options.timeoutMinutes,
     disableTools: true,
+    // No `passthroughEnv` is threaded through here on purpose: the
+    // opencode path inherits `PATH` from `process.env` via
+    // `OpenCodeRuntime.buildEnvironment` (which spreads
+    // `process.env` and only strips `OPENCODE_*` entries), so the
+    // spawn finds the `opencode` binary on PATH without any extra
+    // plumbing. The validator's claude path uses a separate
+    // passthrough env because `ClaudeCodeValidatorRuntime` builds
+    // a scoped allow-list and does NOT spread `process.env`.
   }).then((result) => ({
     text: result.text.trim(),
     tokens: { input: result.tokens.input, output: result.tokens.output },
@@ -175,11 +187,30 @@ export function parseValidatorResponse(text: string): { status: 'valid' | 'inval
  * touch `core` directly.
  */
 export interface ValidateReviewOptions {
+  /**
+   * Review runtime CLI to invoke. `'opencode'` (default) uses the
+   * OpenCode CLI; `'claude'` uses the Claude Code CLI. The default
+   * preserves the package's pre-doubling behavior (always OpenCode);
+   * callers from the root action should always pass this through so
+   * `tool: claude` reviews don't silently leak into the opencode
+   * validator.
+   */
+  tool?: ValidatorTool;
   opencodeVersion: string;
   reviewPath: string;
   model: string;
   timeoutMinutes: number;
   passedConfigJson: string;
+  /**
+   * Env vars to layer on top of `process.env` when spawning the
+   * Claude Code CLI for validation. The action layer uses this to
+   * forward `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`,
+   * `ANTHROPIC_API_KEY=""`, the `CLAUDE_ENABLE_BYTE_WATCHDOG=0` /
+   * `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` flags, and any other
+   * Anthropic-compatible endpoint config. Ignored when
+   * `tool === 'opencode'` (the opencode path strips env itself).
+   */
+  passthroughEnv?: NodeJS.ProcessEnv;
 }
 
 /**
@@ -204,17 +235,12 @@ const EMPTY_RESULT: ValidateReviewResult = {
 };
 
 export async function validateReview(options: ValidateReviewOptions): Promise<ValidateReviewResult> {
-  try {
-    assertOpenCodeVersion(options.opencodeVersion);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      ...EMPTY_RESULT,
-      reason: capReason(`OpenCode version assertion failed: ${message}`),
-      failureReason: `OpenCode version assertion failed: ${message}`,
-    };
-  }
+  const tool: ValidatorTool = options.tool ?? 'opencode';
 
+  // Shared input validation: review-path and timeout apply to both
+  // runtimes. `passedConfigJson` only applies to the opencode path
+  // (the claude path doesn't read it) but we keep the existing check
+  // here for back-compat with callers that pre-date the doubling.
   if (!options.reviewPath) {
     const reason = 'review-path input is required';
     return {
@@ -233,7 +259,7 @@ export async function validateReview(options: ValidateReviewOptions): Promise<Va
     };
   }
 
-  if (!options.passedConfigJson) {
+  if (tool === 'opencode' && !options.passedConfigJson) {
     const reason = 'config-json input is required (resolved validator-only OpenCode config from run-reviews)';
     return {
       ...EMPTY_RESULT,
@@ -242,6 +268,9 @@ export async function validateReview(options: ValidateReviewOptions): Promise<Va
     };
   }
 
+  // Read the review file up front so both runtimes share the same
+  // not-found / empty / structural-rejection path before any CLI is
+  // spawned.
   let reviewContent: string;
   try {
     reviewContent = readReviewFile(options.reviewPath);
@@ -263,24 +292,21 @@ export async function validateReview(options: ValidateReviewOptions): Promise<Va
     };
   }
 
-  let result: InvokeValidatorResult;
-  try {
-    result = await invokeValidator({
-      reviewPath: options.reviewPath,
-      reviewContent,
-      model: options.model,
-      timeoutMinutes: options.timeoutMinutes,
-      passedConfigJson: options.passedConfigJson,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      ...EMPTY_RESULT,
-      reason: capReason(`validator invocation failed: ${message}`),
-      failureReason: `Validator invocation failed: ${message}`,
-    };
+  if (tool === 'claude') {
+    return runClaudeValidation(options, reviewContent);
   }
 
+  return runOpencodeValidation(options, reviewContent);
+}
+
+/**
+ * Shared post-spawn path: invoke the chosen CLI, parse the
+ * `VALID` / `INVALID <reason>` response via
+ * `parseValidatorResponse`, and shape the result.
+ */
+function shapeResult(
+  result: InvokeValidatorResult,
+): ValidateReviewResult {
   const verdict = parseValidatorResponse(result.text);
   return {
     status: verdict.status,
@@ -289,4 +315,72 @@ export async function validateReview(options: ValidateReviewOptions): Promise<Va
     tokens: result.tokens,
     failureReason: verdict.status === 'invalid' ? `Review validation failed: ${verdict.reason}` : '',
   };
+}
+
+function runOpencodeValidation(
+  options: ValidateReviewOptions,
+  reviewContent: string,
+): Promise<ValidateReviewResult> {
+  // OpenCode version assertion only runs on the opencode path.
+  // The claude path's binary check happens inside `runClaudeValidator`
+  // (via the runtime's `assertVersion`); it's a separate concern from
+  // the opencode semver pin.
+  try {
+    assertOpenCodeVersion(options.opencodeVersion);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return Promise.resolve({
+      ...EMPTY_RESULT,
+      reason: capReason(`OpenCode version assertion failed: ${message}`),
+      failureReason: `OpenCode version assertion failed: ${message}`,
+    });
+  }
+
+  return invokeValidator({
+    reviewPath: options.reviewPath,
+    reviewContent,
+    model: options.model,
+    timeoutMinutes: options.timeoutMinutes,
+    passedConfigJson: options.passedConfigJson,
+  })
+    .then(shapeResult)
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ...EMPTY_RESULT,
+        reason: capReason(`validator invocation failed: ${message}`),
+        failureReason: `Validator invocation failed: ${message}`,
+      };
+    });
+}
+
+function runClaudeValidation(
+  options: ValidateReviewOptions,
+  reviewContent: string,
+): Promise<ValidateReviewResult> {
+  // The validator's prompt template is review-content-agnostic: it
+  // asks the model to validate a structural contract. For the
+  // claude runtime the prompt goes verbatim into `claude -p --`;
+  // we don't need a temp config file (the opencode path writes one)
+  // because claude reads from its env / per-process config, not from
+  // a generated `opencode.json`.
+  const prompt = VALIDATOR_AGENT_PROMPT_TEMPLATE
+    .replace('__REVIEW_PATH__', options.reviewPath)
+    .concat('\n\n---\n\nReview file contents:\n\n', reviewContent);
+
+  return runClaudeValidator({
+    prompt,
+    model: options.model,
+    timeoutMinutes: options.timeoutMinutes,
+    passthroughEnv: options.passthroughEnv,
+  })
+    .then(shapeResult)
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ...EMPTY_RESULT,
+        reason: capReason(`validator invocation failed: ${message}`),
+        failureReason: `Validator invocation failed: ${message}`,
+      };
+    });
 }

@@ -16,8 +16,10 @@ import {
   titleOrRefForHeading,
 } from './agent-definition';
 import { buildMergedConfig, buildValidatorConfig } from './config-builder';
-import { invokeOpenCode } from './opencode';
-import type { DebugCapturePaths } from './opencode';
+import { invokeReview } from './opencode';
+import type { DebugCapturePaths, ReviewTool } from './opencode';
+import { OpenCodeRuntime } from './opencode-run';
+import { ClaudeCodeRuntime } from './claude-run';
 import { parsePrompts, composeTaskPromptWithPreviousReviews } from './prompt-composer';
 import type { EventContext, Permission, PromptEntry, ReviewResult } from './types';
 
@@ -179,33 +181,20 @@ function resolveDiffRange(eventContext: EventContext, workingDir: string): strin
   return 'HEAD~1..HEAD';
 }
 
-function assertOpenCodeVersion(expectedVersion: string): void {
-  const result = spawnSync('opencode', ['--version'], {
-    encoding: 'utf8',
-    maxBuffer: 1024 * 1024,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    timeout: 10_000,
-  });
-  const stdout = typeof result.stdout === 'string' ? result.stdout.trim() : '';
-  const stderr = typeof result.stderr === 'string' ? result.stderr.trim() : '';
-
-  if (result.error) {
-    throw new Error(`could not execute 'opencode --version': ${result.error.message}`);
-  }
-  if (result.status !== 0) {
-    throw new Error(
-      `'opencode --version' exited with status ${result.status}${stderr ? `: ${stderr}` : ''}`,
-    );
-  }
-
-  const reportedVersion = stdout || stderr;
-  const versionMatch = reportedVersion.match(/v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
-  const installedVersion = (versionMatch?.[1] ?? reportedVersion.replace(/^v/, '')).trim();
-  const normalizedExpectedVersion = expectedVersion.replace(/^v/, '');
-  if (!installedVersion || installedVersion !== normalizedExpectedVersion) {
-    throw new Error(
-      `expected OpenCode ${normalizedExpectedVersion}, but 'opencode --version' reported '${reportedVersion || '<empty>'}'`,
-    );
+function assertToolVersion(
+  tool: ReviewTool,
+  opencodeVersion: string,
+  claudeVersion: string,
+): void {
+  // The version-check shape (spawnSync <binary> --version, compare
+  // semver, throw on mismatch) lives on each runtime's
+  // `assertVersion` method. For Claude, an empty `claudeVersion`
+  // means "only verify the binary is on PATH" - see the runtime
+  // implementation for the rationale.
+  if (tool === 'claude') {
+    new ClaudeCodeRuntime().assertVersion(claudeVersion);
+  } else {
+    new OpenCodeRuntime().assertVersion(opencodeVersion);
   }
 }
 
@@ -301,7 +290,21 @@ function parseRepository(repository: string | undefined): { owner: string; repo:
  * `@actions/core` inputs into this shape.
  */
 export interface RunReviewsOptions {
+  /**
+   * Review runtime CLI to invoke. `'opencode'` (default) runs the
+   * OpenCode CLI; `'claude'` runs the Claude Code CLI. The standalone
+   * action wrapper and root action both default this to `'opencode'`
+   * when the caller omits the input.
+   */
+  tool: ReviewTool;
+  /** Exact OpenCode version expected from `opencode --version` (only consulted when `tool === 'opencode'`). */
   opencodeVersion: string;
+  /**
+   * Expected Claude Code CLI version (only consulted when
+   * `tool === 'claude'`). When empty, the action only verifies the
+   * `claude` binary is on PATH without pinning a specific version.
+   */
+  claudeVersion?: string;
   debug: boolean;
   model: string;
   modelsInput: string;
@@ -417,10 +420,10 @@ export async function runReviews(options: RunReviewsOptions): Promise<RunReviews
   };
 
   try {
-    assertOpenCodeVersion(options.opencodeVersion);
+    assertToolVersion(options.tool, options.opencodeVersion, options.claudeVersion ?? '');
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return { ...empty, failureReason: `OpenCode version assertion failed: ${message}` };
+    return { ...empty, failureReason: `Review runtime version assertion failed: ${message}` };
   }
 
   const validResults: IndividualReviewResult[] = [];
@@ -493,27 +496,47 @@ export async function runReviews(options: RunReviewsOptions): Promise<RunReviews
   // the placeholder so the prompt is always well-formed.
   reviewDiff = computeReviewDiff(eventContextForSetup, process.env.GITHUB_WORKSPACE || process.cwd());
 
-  try {
-    const agent = buildAgentDefinition({
-      eventContext: eventContextForSetup,
-      priorReviewsBlock,
-      reviewDiff,
-    });
-    const merged = buildMergedConfig({
-      userConfig: options.userConfig,
-      permission: options.permission,
-      agent,
-      model: effectiveModels[0],
-    });
-    configPath = merged.configPath;
-    homeDir = merged.homeDir;
-    serializedConfig = merged.serializedConfig;
+  if (options.tool === 'claude') {
+    // Claude Code does not consume an OpenCode config or an isolated
+    // home directory. Use `os.tmpdir()` as a stand-in `homeDir` so
+    // the dispatcher signature stays uniform across runtimes; the
+    // `ClaudeCodeRuntime.buildEnvironment` ignores it (it builds
+    // the env from a fixed allow-list, not from `homeDir`). The
+    // `configPath` is unused for the same reason. The validator
+    // config is also omitted because the validator is now
+    // tool-aware and mirrors the reviewer's runtime: at the
+    // `tool: claude` path the validator dispatches through
+    // `claude-validate.ts` (Claude Code CLI) instead of the
+    // opencode-only path, so `passedConfigJson` is unused.
+    configPath = '';
+    homeDir = os.tmpdir();
+    serializedConfig = '';
     if (options.debug) {
       debugDirectory = createDebugDirectory();
     }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { ...empty, failureReason: `Review setup failed: ${message}` };
+  } else {
+    try {
+      const agent = buildAgentDefinition({
+        eventContext: eventContextForSetup,
+        priorReviewsBlock,
+        reviewDiff,
+      });
+      const merged = buildMergedConfig({
+        userConfig: options.userConfig,
+        permission: options.permission,
+        agent,
+        model: effectiveModels[0],
+      });
+      configPath = merged.configPath;
+      homeDir = merged.homeDir;
+      serializedConfig = merged.serializedConfig;
+      if (options.debug) {
+        debugDirectory = createDebugDirectory();
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { ...empty, failureReason: `Review setup failed: ${message}` };
+    }
   }
 
   const orderedPrompts = [...prompts].sort((left, right) => compareLexically(left.source, right.source));
@@ -534,7 +557,12 @@ export async function runReviews(options: RunReviewsOptions): Promise<RunReviews
     for (const currentModel of orderedModels) {
       console.log(`Running review: ${currentModel} :: ${prompt.source}`);
       try {
-        const result = await invokeOpenCode(
+        // Model-format errors thrown from the runtime's
+        // `resolveModel` (e.g. `tool=claude` with a model that lacks
+        // the `provider/` prefix) propagate here. Convert to a
+        // per-invocation failure so the loop can continue (and the
+        // remaining model/prompt pairs still produce a document).
+        const result = await invokeReview(
           composeTaskPromptWithPreviousReviews([prompt], priorReviewsBlock),
           currentModel,
           configPath,
@@ -545,6 +573,7 @@ export async function runReviews(options: RunReviewsOptions): Promise<RunReviews
               ? createDebugCapturePaths(debugDirectory, ++debugInvocation, 'review', currentModel)
               : undefined,
           },
+          options.tool,
         );
         accountedResults.push(result);
         successfulModels.add(currentModel);

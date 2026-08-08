@@ -713,36 +713,139 @@ test('unterminated fenced block containing Summary is invalid', () => {
 });
 
 test('prompt templates reference the canonical field order text', () => {
-  for (const [name, template] of [
-    ['REVIEW_AGENT_PROMPT_TEMPLATE', REVIEW_AGENT_PROMPT_TEMPLATE],
-    ['VALIDATOR_AGENT_PROMPT_TEMPLATE', VALIDATOR_AGENT_PROMPT_TEMPLATE],
-  ]) {
-    assert.ok(
-      template.includes(CANONICAL_FIELD_ORDER_TEXT),
-      `${name} must reference the canonical field order text: "${CANONICAL_FIELD_ORDER_TEXT}"`,
-    );
-  }
+  // The validator template embeds the CANONICAL_FIELD_ORDER_TEXT
+  // string directly so the structural validator can match it
+  // field-for-field. The reviewer template, with its new
+  // front-loaded CANONICAL SHAPE worked example, expresses the
+  // field order inline ("Status, then Location, then Description")
+  // rather than interpolating the constant. Assert the literal
+  // string is present ONLY in the validator template; the
+  // reviewer template is asserted separately below to carry
+  // the field order in a model-readable form.
+  assert.ok(
+    VALIDATOR_AGENT_PROMPT_TEMPLATE.includes(CANONICAL_FIELD_ORDER_TEXT),
+    `VALIDATOR_AGENT_PROMPT_TEMPLATE must reference the canonical field order text: "${CANONICAL_FIELD_ORDER_TEXT}"`,
+  );
+  // The reviewer template carries the field order as a numeric
+  // list ("Field 1: Status", "Field 2: Location", "Field 3:
+  // Description").
+  assert.match(
+    REVIEW_AGENT_PROMPT_TEMPLATE,
+    /Field 1[:\s][^\n]*Status/,
+    'REVIEW_AGENT_PROMPT_TEMPLATE must list Status as the first field',
+  );
+  assert.match(
+    REVIEW_AGENT_PROMPT_TEMPLATE,
+    /Field 2[:\s][^\n]*Location/,
+    'REVIEW_AGENT_PROMPT_TEMPLATE must list Location as the second field',
+  );
+  assert.match(
+    REVIEW_AGENT_PROMPT_TEMPLATE,
+    /Field 3[:\s][^\n]*Description/,
+    'REVIEW_AGENT_PROMPT_TEMPLATE must list Description as the third field',
+  );
 });
 
 test('review agent prompt declares the heading-first reply constraint', () => {
   // Bound the regression where the model emitted preamble prose /
   // tool-call XML before the '# Review — <title-or-ref>' heading.
   // The constraint must appear near the top of the prompt so the
-  // model sees it before any other guidance.
+  // model sees it before any other guidance. The new template
+  // expresses the constraint in the CANONICAL SHAPE block:
+  //   - "# Review — <title-or-ref>" appears as the first line of
+  //     the worked example, AND
+  //   - "The first character of your reply is `#`." appears in
+  //     the HOW TO PRODUCE IT block.
+  // Both must precede the RUNTIME CONTEXT section.
+  const headingExampleIdx = REVIEW_AGENT_PROMPT_TEMPLATE.indexOf('# Review — <title-or-ref>');
+  const firstCharacterIdx = REVIEW_AGENT_PROMPT_TEMPLATE.indexOf('first character of your reply');
+  const runtimeContextIdx = REVIEW_AGENT_PROMPT_TEMPLATE.indexOf('RUNTIME CONTEXT');
+  assert.ok(headingExampleIdx >= 0, 'worked example must include the heading shape');
+  assert.ok(firstCharacterIdx >= 0, 'HOW TO PRODUCE IT block must mention the first character');
+  assert.ok(runtimeContextIdx >= 0, 'RUNTIME CONTEXT header must be present');
+  assert.ok(
+    headingExampleIdx < runtimeContextIdx,
+    `worked example heading must precede RUNTIME CONTEXT (heading=${headingExampleIdx}, runtime=${runtimeContextIdx})`,
+  );
+  assert.ok(
+    firstCharacterIdx < runtimeContextIdx,
+    `first-character constraint must precede RUNTIME CONTEXT (constraint=${firstCharacterIdx}, runtime=${runtimeContextIdx})`,
+  );
+  // The worked example is the FIRST non-blank, non-comment
+  // # Review — heading in the prompt (i.e. it appears before
+  // any other rule).
   assert.match(
     REVIEW_AGENT_PROMPT_TEMPLATE,
-    /FIRST LINE OF YOUR REPLY.*emit this exact line.*no preamble.*no explanation.*no markdown backticks.*no XML.*no whitespace before it/s,
-    'REVIEW_AGENT_PROMPT_TEMPLATE must declare the heading-first reply constraint',
+    /CANONICAL SHAPE[\s\S]*?# Review — <title-or-ref>/,
+    'the CANONICAL SHAPE block must include the heading shape',
   );
-  // The constraint must appear before any other rule. Locate the
-  // "Runtime context:" header and assert the constraint precedes it.
-  const constraintIdx = REVIEW_AGENT_PROMPT_TEMPLATE.indexOf('FIRST LINE OF YOUR REPLY');
-  const runtimeContextIdx = REVIEW_AGENT_PROMPT_TEMPLATE.indexOf('Runtime context:');
-  assert.ok(constraintIdx >= 0, 'constraint must be present');
-  assert.ok(runtimeContextIdx >= 0, 'Runtime context: header must be present');
+});
+
+test('review agent prompt front-loads the canonical shape as a worked example', () => {
+  // The hardened template puts a fenced code block containing the
+  // full canonical document shape BEFORE any other guidance, so
+  // the model pattern-matches the shape before reading any prose.
+  // Lock in: the canonical shape block is present, the worked
+  // example is fenced (so the model doesn't accidentally emit it
+  // as literal output), and the block is near the top of the
+  // prompt (before RUNTIME CONTEXT).
+  assert.match(
+    REVIEW_AGENT_PROMPT_TEMPLATE,
+    /CANONICAL SHAPE[\s\S]*?```[\s\S]*?# Review — <title-or-ref>[\s\S]*?```/,
+    'REVIEW_AGENT_PROMPT_TEMPLATE must contain a fenced CANONICAL SHAPE block with the worked example',
+  );
+  // The CANONICAL SHAPE block must precede the RUNTIME CONTEXT
+  // section (the shape is the first thing the model sees).
+  const shapeIdx = REVIEW_AGENT_PROMPT_TEMPLATE.indexOf('CANONICAL SHAPE');
+  const runtimeContextIdx = REVIEW_AGENT_PROMPT_TEMPLATE.indexOf('RUNTIME CONTEXT');
+  assert.ok(shapeIdx >= 0, 'CANONICAL SHAPE block must be present');
+  assert.ok(runtimeContextIdx >= 0, 'RUNTIME CONTEXT header must be present');
   assert.ok(
-    constraintIdx < runtimeContextIdx,
-    `constraint must precede the Runtime context: header (constraint=${constraintIdx}, runtime=${runtimeContextIdx})`,
+    shapeIdx < runtimeContextIdx,
+    `CANONICAL SHAPE must precede RUNTIME CONTEXT (shape=${shapeIdx}, runtime=${runtimeContextIdx})`,
+  );
+});
+
+test('review agent prompt embeds the "common slips" wording to lock in the contract', () => {
+  // The hardened template lists common slips the model has
+  // produced (self-talk in Description, multi-line fields,
+  // extra Summary bullets, preambles) so the model
+  // pattern-matches the WRONG examples with the WRONG
+  // verdict. Lock in the wording so a future template edit
+  // can't accidentally drop the slip list.
+  assert.match(
+    REVIEW_AGENT_PROMPT_TEMPLATE,
+    /WHAT NOT TO DO/i,
+    'REVIEW_AGENT_PROMPT_TEMPLATE must include a "WHAT NOT TO DO" section naming common slips',
+  );
+  // Specific slips the prompt must name explicitly:
+  assert.match(
+    REVIEW_AGENT_PROMPT_TEMPLATE,
+    /self-talk|thinking aloud/i,
+    'REVIEW_AGENT_PROMPT_TEMPLATE must warn against self-talk / thinking aloud',
+  );
+  assert.match(
+    REVIEW_AGENT_PROMPT_TEMPLATE,
+    /extra bullets to Summary|Note: |Total: /,
+    'REVIEW_AGENT_PROMPT_TEMPLATE must warn against extra Summary bullets',
+  );
+  assert.match(
+    REVIEW_AGENT_PROMPT_TEMPLATE,
+    /multi-line|continuation lines/i,
+    'REVIEW_AGENT_PROMPT_TEMPLATE must warn against multi-line continuation lines',
+  );
+  assert.match(
+    REVIEW_AGENT_PROMPT_TEMPLATE,
+    /preamble before/i,
+    'REVIEW_AGENT_PROMPT_TEMPLATE must warn against preambles before the heading',
+  );
+  // The summary must include the worked example with the
+  // expected sentinel so the model has a concrete shape to
+  // pattern-match.
+  assert.match(
+    REVIEW_AGENT_PROMPT_TEMPLATE,
+    /<!-- AI_REVIEW_DONE -->/,
+    'REVIEW_AGENT_PROMPT_TEMPLATE must include the AI_REVIEW_DONE sentinel in the worked example',
   );
 });
 
